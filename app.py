@@ -4,6 +4,9 @@ import altair as alt
 import fitz  # PyMuPDF
 import re
 from datetime import datetime, timedelta
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+import io
 
 # --- CONFIGURATION ---
 REGULATORY_MAP = {
@@ -19,7 +22,6 @@ THEME_REFS = {
     "Capital/Liquidity": {"keywords": [r"capital", r"liquidity"], "ref": "Reg YY"}
 }
 
-# Standard Color Mapping for Visual Consistency
 RISK_COLORS = {
     "💀 OVERDUE": "#000000",
     "🚨 CRITICAL": "#FF4B4B",
@@ -27,6 +29,39 @@ RISK_COLORS = {
     "🟢 On Track": "#00CC96",
     "✅ Closed": "#2E7D32"
 }
+
+# --- PDF GENERATOR ---
+def generate_exec_pdf(df, risk_counts):
+    buffer = io.BytesIO()
+    p = canvas.Canvas(buffer, pagesize=letter)
+    width, height = letter
+
+    p.setFont("Helvetica-Bold", 18)
+    p.drawString(100, height - 80, "MRA Sentinel: Executive Summary")
+    p.setFont("Helvetica", 12)
+    p.drawString(100, height - 100, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    
+    # Metrics
+    p.setFont("Helvetica-Bold", 14)
+    p.drawString(100, height - 140, "Key Metrics")
+    p.setFont("Helvetica", 12)
+    p.drawString(120, height - 160, f"Total MRAs in Portfolio: {len(df)}")
+    
+    overdue_val = abs(df[df['Days_Remaining'] < 0]['Days_Remaining'].min()) if not df[df['Days_Remaining'] < 0].empty else 0
+    p.drawString(120, height - 180, f"Max Days Overdue: {int(overdue_val)}")
+
+    # Portfolio Health
+    p.setFont("Helvetica-Bold", 14)
+    p.drawString(100, height - 220, "Portfolio Health Distribution")
+    y_pos = height - 240
+    p.setFont("Helvetica", 12)
+    for status, count in risk_counts.items():
+        p.drawString(120, y_pos, f"- {status}: {count}")
+        y_pos -= 20
+
+    p.showPage()
+    p.save()
+    return buffer.getvalue()
 
 def convert_df_to_csv(df):
     return df.to_csv(index=False).encode('utf-8')
@@ -82,7 +117,6 @@ if "mra_data" not in st.session_state: st.session_state.mra_data = pd.DataFrame(
 if "audit_log" not in st.session_state: st.session_state.audit_log = pd.DataFrame(columns=["Timestamp", "MRA_ID", "Event", "Prev", "New", "Audit_Context"])
 if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0
 
-# Sidebar
 if st.sidebar.button("📁 Clear Files"): st.session_state.uploader_key += 1; st.rerun()
 if st.sidebar.button("🗑️ Reset Tracker"): 
     st.session_state.mra_data = pd.DataFrame(); st.session_state.audit_log = pd.DataFrame(columns=["Timestamp", "MRA_ID", "Event", "Prev", "New", "Audit_Context"]); st.rerun()
@@ -97,35 +131,38 @@ if not st.session_state.mra_data.empty:
 
     with tabs[0]:
         st.subheader("Executive Risk Oversight")
-        c1, c2 = st.columns([1, 2])
+        c1, c2 = st.columns(2)
         chart_df = st.session_state.mra_data.copy()
         chart_df['Simple_Risk'] = chart_df['Risk_Status'].str.replace("🧊 STALE: ", "")
+        risk_counts = chart_df['Simple_Risk'].value_counts().to_dict()
         
         with c1:
             st.metric("Total MRAs", len(st.session_state.mra_data))
             overdue_items = chart_df[chart_df['Days_Remaining'] < 0]
             max_overdue = abs(overdue_items['Days_Remaining'].min()) if not overdue_items.empty else 0
-            # REMOVED: 'd' suffix as requested
             st.metric("Max Days Overdue", int(max_overdue), delta_color="inverse")
             
-            # DONUT: Added Legend
+            # DONUT: Reduced font and 2-column legend
             st.write("**Portfolio Health Distribution**")
             donut = alt.Chart(chart_df).mark_arc(innerRadius=50).encode(
                 theta="count():Q",
-                color=alt.Color("Simple_Risk:N", scale=alt.Scale(domain=list(RISK_COLORS.keys()), range=list(RISK_COLORS.values())), legend=alt.Legend(title="Risk Status", orient="bottom")),
+                color=alt.Color("Simple_Risk:N", scale=alt.Scale(domain=list(RISK_COLORS.keys()), range=list(RISK_COLORS.values())), 
+                                legend=alt.Legend(title=None, orient="bottom", labelFontSize=10, columns=2, symbolSize=100)),
                 tooltip=["Simple_Risk", "count()"]
             ).properties(height=250)
             st.altair_chart(donut, use_container_width=True)
 
+            # PDF Export Button
+            pdf_data = generate_exec_pdf(chart_df, risk_counts)
+            st.download_button("📄 Export Executive Summary (PDF)", pdf_data, "MRA_Executive_Summary.pdf", "application/pdf")
+
         with c2:
-            # MULTICOLOR HEATMAP: Mapped to Risk Tiers
             heatmap = alt.Chart(chart_df).mark_rect().encode(
                 x=alt.X('Simple_Risk:N', title="Risk Tier", sort=list(RISK_COLORS.keys())),
                 y=alt.Y('Owner:N', title=None),
                 color=alt.Color('Simple_Risk:N', scale=alt.Scale(domain=list(RISK_COLORS.keys()), range=list(RISK_COLORS.values())), legend=None),
                 tooltip=['Owner', 'Simple_Risk', 'count()']
             ).properties(title="Risk Concentration Heatmap", height=350, width=500)
-            
             text = heatmap.mark_text(baseline='middle').encode(text='count():Q', color=alt.value('white'))
             st.altair_chart(heatmap + text, use_container_width=False)
 
