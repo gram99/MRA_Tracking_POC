@@ -25,14 +25,13 @@ def extract_mras_from_pdf(pdf_bytes, filename):
     date_matches = re.findall(rf"(?:{'|'.join(keywords)})[:\s]*(\d{{1,2}}/\d{{1,2}}/\d{{2,4}})", text, re.IGNORECASE)
 
     extracted_findings = []
-    default_start = (datetime.now() - timedelta(days=1)).replace(tzinfo=None)
-    loop_dates = date_matches if date_matches else ["Manual Entry Needed"]
+    default_start = (datetime.now() - timedelta(days=1)).replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
     
-    for i, date_str in enumerate(loop_dates):
+    for i, date_str in enumerate(date_matches if date_matches else ["Manual Entry Needed"]):
         try:
-            deadline = pd.to_datetime(date_str).replace(tzinfo=None)
+            deadline = pd.to_datetime(date_str).to_pydatetime().replace(tzinfo=None)
         except:
-            deadline = (datetime.now() + timedelta(days=90)).replace(tzinfo=None)
+            deadline = (datetime.now() + timedelta(days=90)).replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
 
         extracted_findings.append({
             "MRA_ID": f"{agency}-{filename[:5].upper()}-{i+1:02}",
@@ -47,22 +46,19 @@ def extract_mras_from_pdf(pdf_bytes, filename):
 # --- EARLY WARNING & DAYS REMAINING LOGIC ---
 def apply_sentinel_logic(df, auto_fix=False):
     if df.empty: return df
-    today = datetime.now().replace(tzinfo=None)
+    today = datetime.now().replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
     
-    # Ensure standard datetime formats
+    # Force conversion to standard datetime objects
     df['Deadline'] = pd.to_datetime(df['Deadline']).dt.tz_localize(None)
     df['Start_Date'] = pd.to_datetime(df['Start_Date']).dt.tz_localize(None)
 
     def process_row(row):
-        # Auto-Fix Inversions
         if auto_fix and row['Start_Date'] >= row['Deadline']:
             row['Start_Date'] = row['Deadline'] - timedelta(days=90)
         
-        # Calculate Delta
         delta = (row['Deadline'] - today).days
         row['Days_Remaining'] = delta if row['Status'] != "Closed" else 0
         
-        # Risk Assessment
         if row['Status'] == "Closed": 
             row['Risk_Status'] = "✅ Closed"
         elif row['Start_Date'] >= row['Deadline']: 
@@ -133,6 +129,7 @@ if not st.session_state.mra_data.empty:
         column_config={
             "Status": st.column_config.SelectboxColumn(options=["In Progress", "Submitted for Review", "Closed"]),
             "Deadline": st.column_config.DateColumn(),
+            "Start_Date": st.column_config.DateColumn(),
             "Days_Remaining": st.column_config.NumberColumn("Days Remaining", disabled=True),
             "Risk_Status": st.column_config.TextColumn("Sentinel Assessment", disabled=True)
         }
@@ -143,23 +140,24 @@ if not st.session_state.mra_data.empty:
     tab1, tab2 = st.tabs(["🗺️ Strategic Roadmap", "📧 Escalation Alerts"])
     
     with tab1:
-        # --- ULTIMATE HARDENING ---
+        # --- ULTIMATE HARDENING FOR PX.TIMELINE ---
         chart_df = st.session_state.mra_data.copy()
         
-        # 1. Force Datetime conversion and strip timezones
-        chart_df['Deadline'] = pd.to_datetime(chart_df['Deadline']).dt.tz_localize(None)
-        chart_df['Start_Date'] = pd.to_datetime(chart_df['Start_Date']).dt.tz_localize(None)
+        # Force conversion and drop errors immediately
+        chart_df['Deadline'] = pd.to_datetime(chart_df['Deadline'], errors='coerce')
+        chart_df['Start_Date'] = pd.to_datetime(chart_df['Start_Date'], errors='coerce')
+        chart_df = chart_df.dropna(subset=['Start_Date', 'Deadline'])
         
-        # 2. Drop duplicates and invalid chronology (Start must be < End)
-        chart_df = chart_df.drop_duplicates(subset=['MRA_ID'])
+        # Remove Negative Durations and Duplicates
         chart_df = chart_df[chart_df['Start_Date'] < chart_df['Deadline']]
+        chart_df = chart_df.drop_duplicates(subset=['MRA_ID'])
         
-        # 3. Clean string columns and reset index
+        # Final reset and cast
+        chart_df = chart_df.reset_index(drop=True)
         chart_df['MRA_ID'] = chart_df['MRA_ID'].astype(str)
-        chart_df = chart_df.dropna(subset=['Start_Date', 'Deadline']).reset_index(drop=True)
 
         if not chart_df.empty:
-            # Simplified Chart call without hover_data dictionary to prevent TypeError
+            # Minimalist call to isolate error
             fig_gantt = px.timeline(
                 chart_df, 
                 start="Start_Date", 
@@ -178,7 +176,7 @@ if not st.session_state.mra_data.empty:
             fig_gantt.update_yaxes(autorange="reversed")
             st.plotly_chart(fig_gantt, use_container_width=True)
         else:
-            st.warning("Roadmap hidden: All items currently have invalid date ranges or are missing dates.")
+            st.warning("Roadmap hidden: Please ensure Start Dates are earlier than Deadlines.")
 
     with tab2:
         critical_items = st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨")]
