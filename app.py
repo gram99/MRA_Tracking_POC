@@ -11,7 +11,6 @@ REGULATORY_MAP = {
     "FRB": {"identifier": "Federal Reserve", "keywords": [r"Timeline", r"Due Date"]}
 }
 
-# Thematic mapping with suggested Regulatory References
 THEME_REFS = {
     "Cybersecurity/IT": {
         "keywords": [r"cyber", r"it risk", r"firewall", r"access control"],
@@ -48,7 +47,6 @@ def extract_mras_from_pdf(pdf_bytes, filename):
     keywords = REGULATORY_MAP[agency]["keywords"]
     date_matches = re.findall(rf"(?:{'|'.join(keywords)})[:\s]*(\d{{1,2}}/\d{{1,2}}/\d{{2,4}})", text, re.IGNORECASE)
 
-    # Auto-Theme & Reg Reference Identification
     identified_theme = "General / Other"
     suggested_ref = "N/A"
     for theme, config in THEME_REFS.items():
@@ -82,7 +80,6 @@ def apply_sentinel_logic(df):
     if df.empty: return df
     today = datetime.now().replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
     
-    # Force clean types for chart stability
     for col in ["Deadline", "Start_Date"]:
         df[col] = pd.to_datetime(df[col], errors='coerce').dt.tz_localize(None)
 
@@ -151,16 +148,19 @@ if not st.session_state.mra_data.empty:
             st.metric("Master Inventory", len(st.session_state.mra_data))
             risk_c = len(st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀")])
             st.metric("At-Risk Items", risk_c, delta_color="inverse")
-        with col2:
-            theme_heat = alt.Chart(st.session_state.mra_data).mark_bar().encode(
-                x=alt.X('count():Q', title='Count'),
-                y=alt.Y('Theme:N', title=None, sort='-x'),
-                color=alt.Color('Risk_Status:N', scale=alt.Scale(
-                    domain=["💀 OVERDUE", "🚨 CRITICAL: 75%+", "⚠️ WARNING: 50%+", "🟢 On Track", "✅ Closed"],
-                    range=["#000000", "#FF4B4B", "#FFAA00", "#00CC96", "#2E7D32"]
-                ))
-            ).properties(height=250)
-            st.altair_chart(theme_heat, use_container_width=True)
+        
+        # Trend Analysis: Status Distribution
+        trend_data = st.session_state.mra_data['Risk_Status'].value_counts().reset_index()
+        trend_data.columns = ['Risk_Status', 'Count']
+        trend_chart = alt.Chart(trend_data).mark_bar().encode(
+            x=alt.X('Count:Q'),
+            y=alt.Y('Risk_Status:N', sort='-x', title=None),
+            color=alt.Color('Risk_Status:N', scale=alt.Scale(
+                domain=["💀 OVERDUE", "🚨 CRITICAL: 75%+", "⚠️ WARNING: 50%+", "🟢 On Track", "✅ Closed"],
+                range=["#000000", "#FF4B4B", "#FFAA00", "#00CC96", "#2E7D32"]
+            ))
+        ).properties(height=250, title="Status Concentration")
+        st.altair_chart(trend_chart, use_container_width=True)
 
     with tab_ledger:
         st.subheader("Interactive Remediation Ledger")
@@ -168,9 +168,8 @@ if not st.session_state.mra_data.empty:
         edited_df = st.data_editor(st.session_state.mra_data, use_container_width=True, num_rows="dynamic", key="led_edit",
                                    column_config={
                                        "Theme": st.column_config.SelectboxColumn(options=list(THEME_REFS.keys()) + ["General / Other"]),
-                                       "Reg_Reference": st.column_config.TextColumn("Reg Reference (Manual Override)")
+                                       "Reg_Reference": st.column_config.TextColumn("Reg Reference")
                                    })
-        # Audit Check Logic
         if not edited_df.equals(old_df):
             today = datetime.now().replace(tzinfo=None)
             for idx, row in edited_df.iterrows():
@@ -201,7 +200,8 @@ if not st.session_state.mra_data.empty:
         critical = st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀")]
         if not critical.empty:
             target = st.selectbox("Select MRA for Escalation:", critical['MRA_ID'])
-            row = critical[critical['MRA_ID'] == target].iloc
+            # FIXED: Added .iloc[0] to correctly index the row
+            row = critical[critical['MRA_ID'] == target].iloc[0]
             st.text_area("Email Draft", f"Subject: URGENT: {row['MRA_ID']} [{row['Theme']}] Alert\nRef: {row['Reg_Reference']}\n\nDear {row['Owner']},\n\nFinding {row['MRA_ID']} regarding {row['Theme']} is currently {row['Risk_Status']}.\nDeadline: {row['Deadline'].strftime('%Y-%m-%d')}\nDays Remaining/Late: {int(row['Days_Remaining'])}\n\nPlease update status immediately.", height=180)
         else: st.success("Portfolio healthy.")
 
