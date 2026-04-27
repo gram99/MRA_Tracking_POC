@@ -11,7 +11,6 @@ REGULATORY_MAP = {
     "FRB": {"identifier": "Federal Reserve", "keywords": [r"Timeline", r"Due Date"]}
 }
 
-# Thematic mapping dictionary
 THEME_KEYWORDS = {
     "Cybersecurity/IT": [r"cyber", r"information security", r"it risk", r"firewall", r"access control"],
     "Financial Crime/AML": [r"aml", r"bsa", r"money laundering", r"kyc", r"sanctions"],
@@ -33,7 +32,6 @@ def extract_mras_from_pdf(pdf_bytes, filename):
     keywords = REGULATORY_MAP[agency]["keywords"]
     date_matches = re.findall(rf"(?:{'|'.join(keywords)})[:\s]*(\d{{1,2}}/\d{{1,2}}/\d{{2,4}})", text, re.IGNORECASE)
 
-    # Theme Identification
     identified_theme = "General / Other"
     for theme, patterns in THEME_KEYWORDS.items():
         if any(re.search(p, text, re.IGNORECASE) for p in patterns):
@@ -55,7 +53,8 @@ def extract_mras_from_pdf(pdf_bytes, filename):
             "Owner": "LOB Pending",
             "Start_Date": today_naive - timedelta(days=30),
             "Deadline": deadline,
-            "Status": "In Progress"
+            "Status": "In Progress",
+            "Reg_Reference": "N/A"  # New Column Initialized
         })
     return pd.DataFrame(extracted_findings)
 
@@ -64,10 +63,19 @@ def apply_sentinel_logic(df):
     if df.empty: return df
     today = datetime.now().replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
     
-    df['Deadline'] = pd.to_datetime(df['Deadline']).dt.tz_localize(None)
-    df['Start_Date'] = pd.to_datetime(df['Start_Date']).dt.tz_localize(None)
+    # Fill missing columns that might occur during manual row addition
+    for col in ["Deadline", "Start_Date", "Status", "Owner", "Theme", "Reg_Reference"]:
+        if col not in df.columns: df[col] = "N/A"
+        
+    df['Deadline'] = pd.to_datetime(df['Deadline'], errors='coerce').dt.tz_localize(None)
+    df['Start_Date'] = pd.to_datetime(df['Start_Date'], errors='coerce').dt.tz_localize(None)
 
     def process_row(row):
+        if pd.isnull(row['Deadline']) or pd.isnull(row['Start_Date']):
+            row['Risk_Status'] = "⚠️ Missing Dates"
+            row['Days_Remaining'] = 0
+            return row
+            
         delta = (row['Deadline'] - today).days
         row['Days_Remaining'] = delta if row['Status'] != "Closed" else 0
         
@@ -111,7 +119,6 @@ if st.sidebar.button("🗑️ Reset Master Tracker"):
     st.session_state.uploader_key += 1
     st.rerun()
 
-# Multi-file Uploader
 uploaded_files = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True, key=f"pdf_uploader_{st.session_state.uploader_key}")
 
 if uploaded_files:
@@ -124,37 +131,35 @@ if not st.session_state.mra_data.empty:
     # 1. ANALYTICS
     st.subheader("📊 Portfolio Risk Analytics")
     col1, col2 = st.columns(2) 
-    
     with col1:
         st.metric("Master Inventory", len(st.session_state.mra_data))
         risk_c = len(st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀")])
         st.metric("Risk Portfolio", risk_c, delta_color="inverse")
     
     with col2:
-        # HEATMAP: Theme Concentration
+        # Theme Heatmap
         theme_chart = alt.Chart(st.session_state.mra_data).mark_bar().encode(
-            x=alt.X('count():Q', title='Count of Findings'),
+            x=alt.X('count():Q', title='Count'),
             y=alt.Y('Theme:N', title=None, sort='-x'),
             color=alt.Color('Risk_Status:N', scale=alt.Scale(
-                domain=["💀 OVERDUE", "🚨 CRITICAL: 75%+", "⚠️ WARNING: 50%+", "🟢 On Track", "✅ Closed"],
-                range=["#000000", "#FF4B4B", "#FFAA00", "#00CC96", "#2E7D32"]
+                domain=["💀 OVERDUE", "🚨 CRITICAL: 75%+", "⚠️ WARNING: 50%+", "🟢 On Track", "✅ Closed", "⚠️ Missing Dates"],
+                range=["#000000", "#FF4B4B", "#FFAA00", "#00CC96", "#2E7D32", "#808080"]
             ))
         ).properties(height=200)
         st.altair_chart(theme_chart, use_container_width=True)
 
-    # 2. LEDGER (Thematic Editor)
+    # 2. LEDGER (New Reg Reference Column Added)
     st.subheader("📋 Centralized Remediation Ledger")
-    
     old_df = st.session_state.mra_data.copy()
     edited_df = st.data_editor(st.session_state.mra_data, 
                                use_container_width=True, 
                                num_rows="dynamic", 
                                key="main_editor",
                                column_config={
-                                   "Theme": st.column_config.SelectboxColumn(options=list(THEME_KEYWORDS.keys()) + ["General / Other"])
+                                   "Theme": st.column_config.SelectboxColumn(options=list(THEME_KEYWORDS.keys()) + ["General / Other"]),
+                                   "Reg_Reference": st.column_config.TextColumn("Reg Reference (e.g. SR 11-7)")
                                })
     
-    # Audit Trace
     if not edited_df.equals(old_df):
         today = datetime.now().replace(tzinfo=None)
         for idx, row in edited_df.iterrows():
@@ -179,35 +184,36 @@ if not st.session_state.mra_data.empty:
     tab1, tab2, tab3 = st.tabs(["🗺️ Strategic Roadmap", "📧 Alerts", "📜 Audit Trail"])
     
     with tab1:
-        gantt = alt.Chart(st.session_state.mra_data).mark_bar().encode(
-            x=alt.X('Start_Date:T', title='Timeline'),
-            x2='Deadline:T',
-            y=alt.Y('MRA_ID:N', sort='ascending', title=None),
-            color=alt.Color('Risk_Status:N', scale=alt.Scale(
-                domain=["💀 OVERDUE", "🚨 CRITICAL: 75%+", "⚠️ WARNING: 50%+", "🟢 On Track", "✅ Closed"],
-                range=["#000000", "#FF4B4B", "#FFAA00", "#00CC96", "#2E7D32"]
-            )),
-            tooltip=['MRA_ID', 'Theme', 'Owner', 'Status', 'Days_Remaining']
-        ).properties(height=alt.Step(40)).interactive()
-        st.altair_chart(gantt, use_container_width=True)
+        # --- CRITICAL FIX FOR ALTAIR VALUEERROR ---
+        chart_df = st.session_state.mra_data.copy()
+        # Ensure only rows with valid chartable dates are passed
+        chart_df = chart_df.dropna(subset=['Start_Date', 'Deadline'])
+        chart_df = chart_df[chart_df['Risk_Status'] != "⚠️ Missing Dates"]
+        
+        if not chart_df.empty:
+            gantt = alt.Chart(chart_df).mark_bar().encode(
+                x=alt.X('Start_Date:T', title='Timeline'),
+                x2='Deadline:T',
+                y=alt.Y('MRA_ID:N', sort='ascending', title=None),
+                color=alt.Color('Risk_Status:N', scale=alt.Scale(
+                    domain=["💀 OVERDUE", "🚨 CRITICAL: 75%+", "⚠️ WARNING: 50%+", "🟢 On Track", "✅ Closed"],
+                    range=["#000000", "#FF4B4B", "#FFAA00", "#00CC96", "#2E7D32"]
+                )),
+                tooltip=['MRA_ID', 'Theme', 'Reg_Reference', 'Owner', 'Status']
+            ).properties(height=alt.Step(40)).interactive()
+            st.altair_chart(gantt, use_container_width=True)
+        else:
+            st.info("Assign Start and Deadline dates in the Ledger to view the Roadmap.")
 
     with tab2:
         critical_items = st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀")]
         if not critical_items.empty:
             target = st.selectbox("Select MRA for Alert:", critical_items['MRA_ID'])
-            row = critical_items[critical_items['MRA_ID'] == target].iloc
-            
-            s_lbl = "OVERDUE" if row['Days_Remaining'] < 0 else "CRITICAL"
-            email = f"Subject: URGENT: {s_lbl} [{row['Theme']}] Alert - {row['MRA_ID']}\n\nDear {row['Owner']},\n\nFinding {row['MRA_ID']} regarding {row['Theme']} is {s_lbl}.\nDeadline: {row['Deadline'].strftime('%Y-%m-%d')}\n\nPlease update immediately."
+            row = critical_items[critical_items['MRA_ID'] == target].iloc[0]
+            email = f"Subject: URGENT: {row['MRA_ID']} [{row['Theme']}] Alert\nRef: {row['Reg_Reference']}\n\nDear {row['Owner']},\n\nFinding {row['MRA_ID']} regarding {row['Theme']} is at risk. \nDeadline: {row['Deadline'].strftime('%Y-%m-%d')}\n\nPlease update status immediately."
             st.text_area("Draft Notification", email, height=180)
-        else:
-            st.success("No critical alerts required.")
 
     with tab3:
         if not st.session_state.audit_log.empty:
             st.dataframe(st.session_state.audit_log, use_container_width=True)
             st.download_button("📥 Export Audit Log", convert_df_to_csv(st.session_state.audit_log), "MRA_Audit_Trail.csv", "text/csv")
-        else:
-            st.info("No status changes recorded.")
-
-    st.download_button("📥 Export Master Tracker", convert_df_to_csv(st.session_state.mra_data), "MRA_Master_Tracker.csv", "text/csv")
