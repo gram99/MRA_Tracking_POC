@@ -42,7 +42,7 @@ def extract_mras_from_pdf(pdf_bytes, filename):
         })
     return pd.DataFrame(extracted_findings)
 
-# --- SENTINEL LOGIC ---
+# --- SENTINEL LOGIC & AUDIT TRACKER ---
 def apply_sentinel_logic(df):
     if df.empty: return df
     today = datetime.now().replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
@@ -75,11 +75,16 @@ def apply_sentinel_logic(df):
 st.set_page_config(page_title="MRA Sentinel", layout="wide")
 st.title("🛡️ MRA Sentinel: Command Center")
 
+# Initialize Session States
 if "mra_data" not in st.session_state:
     st.session_state.mra_data = pd.DataFrame()
+if "audit_log" not in st.session_state:
+    st.session_state.audit_log = pd.DataFrame(columns=["Timestamp", "MRA_ID", "Event", "Previous_Status", "New_Status"])
 
-if st.sidebar.button("🗑️ Clear Tracker"):
+# Sidebar
+if st.sidebar.button("🗑️ Clear All Data"):
     st.session_state.mra_data = pd.DataFrame()
+    st.session_state.audit_log = pd.DataFrame(columns=["Timestamp", "MRA_ID", "Event", "Previous_Status", "New_Status"])
     st.rerun()
 
 uploaded_files = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True)
@@ -99,7 +104,6 @@ if not st.session_state.mra_data.empty:
         st.metric("Risk Portfolio", risk_c, delta_color="inverse")
     
     with col2:
-        # Altair Heatmap/Bar for Risk by Owner
         heat_chart = alt.Chart(st.session_state.mra_data).mark_bar().encode(
             x=alt.X('count():Q', title='Count'),
             y=alt.Y('Owner:N', title=None),
@@ -110,18 +114,36 @@ if not st.session_state.mra_data.empty:
         ).properties(height=200)
         st.altair_chart(heat_chart, use_container_width=True)
 
-    # 2. LEDGER
+    # 2. LEDGER (With Audit Tracking)
     st.subheader("📋 Centralized Remediation Ledger")
+    
+    # Store old status to detect changes
+    old_df = st.session_state.mra_data.copy()
+    
     edited_df = st.data_editor(st.session_state.mra_data, use_container_width=True, num_rows="dynamic")
+    
+    # Audit Check: Detect Status Transitions
+    if not edited_df.equals(old_df):
+        for idx, row in edited_df.iterrows():
+            if idx in old_df.index:
+                if row['Status'] != old_df.loc[idx, 'Status']:
+                    new_entry = pd.DataFrame([{
+                        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "MRA_ID": row['MRA_ID'],
+                        "Event": "Status Change",
+                        "Previous_Status": old_df.loc[idx, 'Status'],
+                        "New_Status": row['Status']
+                    }])
+                    st.session_state.audit_log = pd.concat([st.session_state.audit_log, new_entry], ignore_index=True)
+        
     st.session_state.mra_data = apply_sentinel_logic(edited_df)
 
-    # 3. ROADMAP (Altair Gantt)
-    st.subheader("🗺️ Strategic Roadmap")
-    chart_df = st.session_state.mra_data.copy()
+    # 3. ROADMAP & AUDIT TRAIL TABS
+    tab1, tab2, tab3 = st.tabs(["🗺️ Strategic Roadmap", "📧 Alerts", "📜 Audit Trail"])
     
-    # Altair is more flexible, but we still want unique Y-axis labels
-    if not chart_df.empty:
-        gantt = alt.Chart(chart_df).mark_bar().encode(
+    with tab1:
+        st.subheader("Interactive Gantt")
+        gantt = alt.Chart(st.session_state.mra_data).mark_bar().encode(
             x=alt.X('Start_Date:T', title='Timeline'),
             x2='Deadline:T',
             y=alt.Y('MRA_ID:N', sort='ascending', title=None),
@@ -131,7 +153,22 @@ if not st.session_state.mra_data.empty:
             )),
             tooltip=['MRA_ID', 'Owner', 'Status', 'Days_Remaining']
         ).properties(height=alt.Step(40)).interactive()
-        
         st.altair_chart(gantt, use_container_width=True)
+
+    with tab2:
+        critical_items = st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨")]
+        if not critical_items.empty:
+            target = st.selectbox("Select MRA for Alert:", critical_items['MRA_ID'])
+            row = critical_items[critical_items['MRA_ID'] == target].iloc[0]
+            st.text_area("Draft Notification", f"Subject: URGENT: Remediation Alert [{row['MRA_ID']}]\n\nDear {row['Owner']},\n\nFinding {row['MRA_ID']} is at CRITICAL risk ({int(row['Days_Remaining'])} days remaining).\nDeadline: {row['Deadline'].strftime('%Y-%m-%d')}\n\nPlease update status immediately.", height=150)
+        else:
+            st.success("No critical alerts required.")
+
+    with tab3:
+        st.subheader("Historical Log of Status Changes")
+        if not st.session_state.audit_log.empty:
+            st.dataframe(st.session_state.audit_log, use_container_width=True)
+        else:
+            st.info("No status changes recorded yet.")
 
     st.download_button("📥 Export CSV", convert_df_to_csv(st.session_state.mra_data), "MRA_Sentinel_Export.csv", "text/csv")
