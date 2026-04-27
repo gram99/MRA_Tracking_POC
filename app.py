@@ -1,14 +1,14 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
+import altair as alt
 import fitz  # PyMuPDF
 import re
 from datetime import datetime, timedelta
 
 # --- CONFIGURATION ---
 REGULATORY_MAP = {
-    "OCC": {"identifier": "Comptroller", "keywords": [r"Target Date", r"Commitment Date", r"Completion Date"]},
-    "FRB": {"identifier": "Federal Reserve", "keywords": [r"Timeline", r"Due Date", r"Expectation Date", r"Required Action"]}
+    "OCC": {"identifier": "Comptroller", "keywords": [r"Target Date", r"Commitment Date"]},
+    "FRB": {"identifier": "Federal Reserve", "keywords": [r"Timeline", r"Due Date"]}
 }
 
 def convert_df_to_csv(df):
@@ -25,7 +25,6 @@ def extract_mras_from_pdf(pdf_bytes, filename):
     date_matches = re.findall(rf"(?:{'|'.join(keywords)})[:\s]*(\d{{1,2}}/\d{{1,2}}/\d{{2,4}})", text, re.IGNORECASE)
 
     extracted_findings = []
-    # Standardizing dates for the current 2026 system date
     today_naive = datetime.now().replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
     
     for i, date_str in enumerate(date_matches if date_matches else ["Manual Entry"]):
@@ -43,12 +42,11 @@ def extract_mras_from_pdf(pdf_bytes, filename):
         })
     return pd.DataFrame(extracted_findings)
 
-# --- EARLY WARNING & LOGIC ---
+# --- SENTINEL LOGIC ---
 def apply_sentinel_logic(df):
     if df.empty: return df
     today = datetime.now().replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
     
-    # Force clean datetime types
     df['Deadline'] = pd.to_datetime(df['Deadline']).dt.tz_localize(None)
     df['Start_Date'] = pd.to_datetime(df['Start_Date']).dt.tz_localize(None)
 
@@ -61,13 +59,13 @@ def apply_sentinel_logic(df):
         elif delta < 0:
             row['Risk_Status'] = "💀 OVERDUE"
         elif row['Start_Date'] >= row['Deadline']:
-            row['Risk_Status'] = "❌ Date Inversion"
+            row['Risk_Status'] = "⚠️ Date Inversion"
         else:
             total_window = (row['Deadline'] - row['Start_Date']).days
             elapsed = (today - row['Start_Date']).days
             burn_rate = elapsed / total_window if total_window > 0 else 1
-            if burn_rate >= 0.75: row['Risk_Status'] = "🚨 CRITICAL: 75%+ Elapsed"
-            elif burn_rate >= 0.50: row['Risk_Status'] = "⚠️ WARNING: 50% Elapsed"
+            if burn_rate >= 0.75: row['Risk_Status'] = "🚨 CRITICAL: 75%+"
+            elif burn_rate >= 0.50: row['Risk_Status'] = "⚠️ WARNING: 50%+"
             else: row['Risk_Status'] = "🟢 On Track"
         return row
 
@@ -80,12 +78,11 @@ st.title("🛡️ MRA Sentinel: Command Center")
 if "mra_data" not in st.session_state:
     st.session_state.mra_data = pd.DataFrame()
 
-# Sidebar reset
-if st.sidebar.button("🗑️ Clear Master Tracker"):
+if st.sidebar.button("🗑️ Clear Tracker"):
     st.session_state.mra_data = pd.DataFrame()
     st.rerun()
 
-uploaded_files = st.file_uploader("Batch Upload PDFs", type=["pdf"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True)
 if uploaded_files:
     if st.button("🚀 Ingest Findings"):
         new_recs = [extract_mras_from_pdf(f.read(), f.name) for f in uploaded_files]
@@ -95,69 +92,46 @@ if uploaded_files:
 if not st.session_state.mra_data.empty:
     # 1. ANALYTICS
     st.subheader("📊 Portfolio Risk Analytics")
-    col1, col2, col3 = st.columns([1, 1.5, 2])
+    col1, col2 = st.columns([1, 2])
     with col1:
         st.metric("Master Inventory", len(st.session_state.mra_data))
-        risk_items = len(st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀")])
-        st.metric("Risk Portfolio", risk_items, delta_color="inverse")
+        risk_c = len(st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀")])
+        st.metric("Risk Portfolio", risk_c, delta_color="inverse")
+    
     with col2:
-        dist = st.session_state.mra_data['Risk_Status'].value_counts().reset_index()
-        fig_donut = px.pie(dist, values='count', names='Risk_Status', hole=0.5, 
-                           color='Risk_Status', color_discrete_map={"💀 OVERDUE": "#000000", "🚨 CRITICAL: 75%+ Elapsed": "#FF4B4B", "⚠️ WARNING: 50% Elapsed": "#FFAA00", "🟢 On Track": "#00CC96", "✅ Closed": "#2E7D32"})
-        st.plotly_chart(fig_donut, use_container_width=True)
-    with col3:
-        heat = st.session_state.mra_data.groupby(['Owner', 'Risk_Status']).size().unstack(fill_value=0)
-        fig_heat = px.bar(heat, barmode="stack", color_discrete_sequence=["#1B263B", "#415A77", "#778DA9"])
-        st.plotly_chart(fig_heat, use_container_width=True)
+        # Altair Heatmap/Bar for Risk by Owner
+        heat_chart = alt.Chart(st.session_state.mra_data).mark_bar().encode(
+            x=alt.X('count():Q', title='Count'),
+            y=alt.Y('Owner:N', title=None),
+            color=alt.Color('Risk_Status:N', scale=alt.Scale(
+                domain=["💀 OVERDUE", "🚨 CRITICAL: 75%+", "⚠️ WARNING: 50%+", "🟢 On Track", "✅ Closed"],
+                range=["#000000", "#FF4B4B", "#FFAA00", "#00CC96", "#2E7D32"]
+            ))
+        ).properties(height=200)
+        st.altair_chart(heat_chart, use_container_width=True)
 
     # 2. LEDGER
     st.subheader("📋 Centralized Remediation Ledger")
     edited_df = st.data_editor(st.session_state.mra_data, use_container_width=True, num_rows="dynamic")
     st.session_state.mra_data = apply_sentinel_logic(edited_df)
 
-    # 3. ROADMAP
-    tab1, tab2 = st.tabs(["🗺️ Strategic Roadmap", "📧 Alerts"])
-    with tab1:
-        # --- THE FIX: VISUAL CHRONOLOGY GUARD ---
-        chart_df = st.session_state.mra_data.copy()
+    # 3. ROADMAP (Altair Gantt)
+    st.subheader("🗺️ Strategic Roadmap")
+    chart_df = st.session_state.mra_data.copy()
+    
+    # Altair is more flexible, but we still want unique Y-axis labels
+    if not chart_df.empty:
+        gantt = alt.Chart(chart_df).mark_bar().encode(
+            x=alt.X('Start_Date:T', title='Timeline'),
+            x2='Deadline:T',
+            y=alt.Y('MRA_ID:N', sort='ascending', title=None),
+            color=alt.Color('Risk_Status:N', scale=alt.Scale(
+                domain=["💀 OVERDUE", "🚨 CRITICAL: 75%+", "⚠️ WARNING: 50%+", "🟢 On Track", "✅ Closed"],
+                range=["#000000", "#FF4B4B", "#FFAA00", "#00CC96", "#2E7D32"]
+            )),
+            tooltip=['MRA_ID', 'Owner', 'Status', 'Days_Remaining']
+        ).properties(height=alt.Step(40)).interactive()
         
-        # Force conversion and drop bad data immediately
-        chart_df['Deadline'] = pd.to_datetime(chart_df['Deadline'], errors='coerce').dt.tz_localize(None)
-        chart_df['Start_Date'] = pd.to_datetime(chart_df['Start_Date'], errors='coerce').dt.tz_localize(None)
-        chart_df = chart_df.dropna(subset=['Start_Date', 'Deadline'])
+        st.altair_chart(gantt, use_container_width=True)
 
-        # FIX: If Start >= End, artificially set Start to 30 days before End for the chart only
-        def force_positive_duration(row):
-            if row['Start_Date'] >= row['Deadline']:
-                row['Start_Date'] = row['Deadline'] - timedelta(days=30)
-            return row
-        
-        chart_df = chart_df.apply(force_positive_duration, axis=1)
-        chart_df['MRA_ID'] = chart_df['MRA_ID'].astype(str)
-        chart_df = chart_df.reset_index(drop=True)
-
-        if not chart_df.empty:
-            # Cleanest possible call to prevent TypeError
-            fig_gantt = px.timeline(
-                chart_df, 
-                start="Start_Date", 
-                end="Deadline", 
-                x_start="Start_Date", 
-                x_end="Deadline", 
-                y="MRA_ID", 
-                color="Risk_Status",
-                color_discrete_map={
-                    "💀 OVERDUE": "#000000", 
-                    "🚨 CRITICAL: 75%+ Elapsed": "#FF4B4B", 
-                    "⚠️ WARNING: 50% Elapsed": "#FFAA00", 
-                    "🟢 On Track": "#00CC96", 
-                    "✅ Closed": "#2E7D32",
-                    "❌ Date Inversion": "#808080"
-                }
-            )
-            fig_gantt.update_yaxes(autorange="reversed")
-            st.plotly_chart(fig_gantt, use_container_width=True)
-        else:
-            st.warning("Roadmap hidden: All items currently have invalid or missing dates.")
-
-    st.download_button("📥 Export CSV Tracker", convert_df_to_csv(st.session_state.mra_data), "MRA_Sentinel_Tracker.csv", "text/csv")
+    st.download_button("📥 Export CSV", convert_df_to_csv(st.session_state.mra_data), "MRA_Sentinel_Export.csv", "text/csv")
