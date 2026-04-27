@@ -32,46 +32,77 @@ def extract_mras_from_pdf(pdf_bytes, filename):
     keywords = REGULATORY_MAP[agency]["keywords"]
     date_matches = re.findall(rf"(?:{'|'.join(keywords)})[:\s]*(\d{{1,2}}/\d{{1,2}}/\d{{2,4}})", text, re.IGNORECASE)
 
-    theme, ref = "General / Other", "N/A"
-    for t, config in THEME_REFS.items():
+    identified_theme = "General / Other"
+    suggested_ref = "N/A"
+    for theme, config in THEME_REFS.items():
         if any(re.search(p, text, re.IGNORECASE) for p in config["keywords"]):
-            theme, ref = t, config["ref"]
+            identified_theme = theme
+            suggested_ref = config["ref"]
             break
 
-    extracted = []
+    extracted_findings = []
     today = datetime.now().replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
+    
     for i, date_str in enumerate(date_matches if date_matches else ["Manual Entry"]):
-        try: deadline = pd.to_datetime(date_str).to_pydatetime().replace(tzinfo=None)
-        except: deadline = today + timedelta(days=90)
-        extracted.append({"MRA_ID": f"{agency}-{filename[:5].upper()}-{i+1:02}", "Theme": theme, "Reg_Reference": ref, "Owner": "LOB Pending", "Start_Date": today - timedelta(days=30), "Deadline": deadline, "Status": "In Progress", "Last_Updated": today, "Days_Since_Update": 0})
-    return pd.DataFrame(extracted)
+        try:
+            deadline = pd.to_datetime(date_str).to_pydatetime().replace(tzinfo=None)
+        except:
+            deadline = today + timedelta(days=90)
 
-# --- LOGIC ---
+        extracted_findings.append({
+            "MRA_ID": f"{agency}-{filename[:5].upper()}-{i+1:02}",
+            "Theme": identified_theme,
+            "Reg_Reference": suggested_ref,
+            "Owner": "LOB Pending",
+            "Start_Date": today - timedelta(days=30),
+            "Deadline": deadline,
+            "Status": "In Progress",
+            "Last_Updated": today,
+            "Days_Since_Update": 0
+        })
+    return pd.DataFrame(extracted_findings)
+
+# --- SENTINEL LOGIC ---
 def apply_sentinel_logic(df):
     if df.empty: return df
     today = datetime.now().replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
-    for c in ["Deadline", "Start_Date", "Last_Updated"]:
-        df[c] = pd.to_datetime(df[c], errors='coerce').dt.tz_localize(None)
     
-    def process(row):
-        row['Days_Since_Update'] = max(0, (today - row['Last_Updated'].replace(tzinfo=None)).days)
-        stale = "🧊 STALE: " if row['Days_Since_Update'] > 30 and row['Status'] != "Closed" else ""
+    cols = ["Deadline", "Start_Date", "Last_Updated", "Days_Since_Update", "Status", "Theme", "Reg_Reference"]
+    for c in cols:
+        if c not in df.columns: df[c] = None
+
+    df['Deadline'] = pd.to_datetime(df['Deadline'], errors='coerce').dt.tz_localize(None)
+    df['Start_Date'] = pd.to_datetime(df['Start_Date'], errors='coerce').dt.tz_localize(None)
+    df['Last_Updated'] = pd.to_datetime(df['Last_Updated'], errors='coerce').dt.tz_localize(None).fillna(today)
+
+    def process_row(row):
+        days_stale = (today - row['Last_Updated']).days
+        row['Days_Since_Update'] = max(0, days_stale)
+        stale_prefix = "🧊 STALE: " if days_stale > 30 and row['Status'] != "Closed" else ""
+
+        if pd.isnull(row['Deadline']) or pd.isnull(row['Start_Date']):
+            row['Risk_Status'] = "⚠️ Missing Dates"
+            row['Days_Remaining'] = 0
+            return row
+            
         delta = (row['Deadline'] - today).days
         row['Days_Remaining'] = delta if row['Status'] != "Closed" else 0
+        
         if row['Status'] == "Closed": row['Risk_Status'] = "✅ Closed"
-        elif delta < 0: row['Risk_Status'] = f"{stale}💀 OVERDUE"
+        elif delta < 0: row['Risk_Status'] = f"{stale_prefix}💀 OVERDUE"
         elif row['Start_Date'] >= row['Deadline']: row['Risk_Status'] = "⚠️ Date Inversion"
         else:
-            w = (row['Deadline'] - row['Start_Date']).days
-            e = (today - row['Start_Date']).days
-            burn = e / w if w > 0 else 1
-            if burn >= 0.75: row['Risk_Status'] = f"{stale}🚨 CRITICAL"
-            elif burn >= 0.50: row['Risk_Status'] = f"{stale}⚠️ WARNING"
-            else: row['Risk_Status'] = f"{stale}🟢 On Track"
+            window = (row['Deadline'] - row['Start_Date']).days
+            elapsed = (today - row['Start_Date']).days
+            burn = elapsed / window if window > 0 else 1
+            if burn >= 0.75: row['Risk_Status'] = f"{stale_prefix}🚨 CRITICAL: 75%+"
+            elif burn >= 0.50: row['Risk_Status'] = f"{stale_prefix}⚠️ WARNING: 50%+"
+            else: row['Risk_Status'] = f"{stale_prefix}🟢 On Track"
         return row
-    return df.apply(process, axis=1)
 
-# --- UI ---
+    return df.apply(process_row, axis=1)
+
+# --- UI SETUP ---
 st.set_page_config(page_title="MRA Sentinel", layout="wide")
 st.title("🛡️ MRA Sentinel: Command Center")
 
@@ -79,76 +110,94 @@ if "mra_data" not in st.session_state: st.session_state.mra_data = pd.DataFrame(
 if "audit_log" not in st.session_state: st.session_state.audit_log = pd.DataFrame(columns=["Timestamp", "MRA_ID", "Event", "Prev", "New", "Audit_Context"])
 if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0
 
-# Sidebar
-if st.sidebar.button("📁 Clear Files"): st.session_state.uploader_key += 1; st.rerun()
-if st.sidebar.button("🗑️ Reset Tracker"): st.session_state.mra_data = pd.DataFrame(); st.session_state.audit_log = pd.DataFrame(columns=["Timestamp", "MRA_ID", "Event", "Prev", "New", "Audit_Context"]); st.rerun()
+st.sidebar.header("Sentinel Controls")
+if st.sidebar.button("📁 Clear Files"):
+    st.session_state.uploader_key += 1
+    st.rerun()
+if st.sidebar.button("🗑️ Reset Tracker"):
+    st.session_state.mra_data = pd.DataFrame()
+    st.session_state.audit_log = pd.DataFrame(columns=["Timestamp", "MRA_ID", "Event", "Prev", "New", "Audit_Context"])
+    st.rerun()
 
-up = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True, key=f"up_{st.session_state.uploader_key}")
-if up and st.button("🚀 Ingest"):
-    new = pd.concat([extract_mras_from_pdf(f.read(), f.name) for f in up])
-    st.session_state.mra_data = apply_sentinel_logic(pd.concat([st.session_state.mra_data, new], ignore_index=True)).drop_duplicates(subset=['MRA_ID'])
+uploaded_files = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True, key=f"up_{st.session_state.uploader_key}")
+if uploaded_files:
+    if st.button("🚀 Ingest Findings"):
+        new_recs = [extract_mras_from_pdf(f.read(), f.name) for f in uploaded_files]
+        combined = pd.concat([st.session_state.mra_data, *new_recs], ignore_index=True)
+        st.session_state.mra_data = apply_sentinel_logic(combined).drop_duplicates(subset=['MRA_ID'])
 
 if not st.session_state.mra_data.empty:
-    tabs = st.tabs(["📊 Executive Dashboard", "📋 Centralized Ledger", "🗺️ Strategic Roadmap", "📧 Alerts", "📜 Audit Trail"])
+    tab_exec, tab_ledger, tab_roadmap, tab_alerts, tab_audit = st.tabs(["📊 Executive Dashboard", "📋 Centralized Ledger", "🗺️ Strategic Roadmap", "📧 Alerts", "📜 Audit Trail"])
 
-    with tabs[0]:
+    with tab_exec:
         st.subheader("Executive Risk Oversight")
-        c1, c2 = st.columns([1, 2])
-        chart_df = st.session_state.mra_data.copy()
-        chart_df['Simple_Risk'] = chart_df['Risk_Status'].str.replace("🧊 STALE: ", "")
-        
-        with c1:
+        col1, col2 = st.columns(2)
+        with col1:
+            # Metric Summary
             st.metric("Total MRAs", len(st.session_state.mra_data))
-            st.metric("Critical/Overdue", len(chart_df[chart_df['Simple_Risk'].str.contains("🚨|💀")]))
+            risk_c = len(st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀")])
+            st.metric("Critical/Overdue", risk_c, delta_color="inverse")
             
-            # --- NEW: STATUS TREND CHART ---
-            if not st.session_state.audit_log.empty:
-                st.write("**Remediation Velocity (Audit Trail)**")
-                trend = st.session_state.audit_log.groupby("New").size().reset_index(name='count')
-                st.altair_chart(alt.Chart(trend).mark_arc(innerRadius=40).encode(theta="count:Q", color="New:N"), use_container_width=True)
+            # Risk Status Bar Chart
+            chart_df = st.session_state.mra_data.copy()
+            chart_df['Simple_Risk'] = chart_df['Risk_Status'].str.replace("🧊 STALE: ", "")
+            exec_chart = alt.Chart(chart_df).mark_bar().encode(
+                x='count():Q', y=alt.Y('Simple_Risk:N', sort='-x', title=None),
+                color=alt.Color('Simple_Risk:N', scale=alt.Scale(domain=["💀 OVERDUE", "🚨 CRITICAL: 75%+", "⚠️ WARNING: 50%+", "🟢 On Track", "✅ Closed"], range=["#000000", "#FF4B4B", "#FFAA00", "#00CC96", "#2E7D32"]))
+            ).properties(height=200)
+            st.altair_chart(exec_chart, use_container_width=True)
 
-        with c2:
-            # --- REFINED: NARROWER HEATMAP ---
-            heatmap = alt.Chart(chart_df).mark_rect().encode(
-                x=alt.X('Simple_Risk:N', title="Risk Tier", sort=["💀 OVERDUE", "🚨 CRITICAL", "⚠️ WARNING", "🟢 On Track", "✅ Closed"]),
-                y=alt.Y('Owner:N', title=None),
-                color=alt.Color('count():Q', scale=alt.Scale(scheme='reds'), title="Freq"),
+        with col2:
+            # NEW HEATMAP: Concentration of Risk by Owner
+            heatmap_chart = alt.Chart(chart_df).mark_rect().encode(
+                x=alt.X('Simple_Risk:N', title="Risk Tier", sort=["💀 OVERDUE", "🚨 CRITICAL: 75%+", "⚠️ WARNING: 50%+", "🟢 On Track", "✅ Closed"]),
+                y=alt.Y('Owner:N', title="Remediation Owner"),
+                color=alt.Color('count():Q', scale=alt.Scale(scheme='reds'), title="Frequency"),
                 tooltip=['Owner', 'Simple_Risk', 'count()']
-            ).properties(title="Risk Concentration", height=250, width=400) # Added explicit width
-            st.altair_chart(heatmap, use_container_width=False)
+            ).properties(title="Regulatory Risk Heatmap", height=320)
+            st.altair_chart(heatmap_chart, use_container_width=True)
 
-    with tabs[1]:
-        old = st.session_state.mra_data.copy()
-        ed = st.data_editor(st.session_state.mra_data, use_container_width=True, num_rows="dynamic", key="led_edit")
-        if not ed.equals(old):
-            now = datetime.now().replace(tzinfo=None)
-            for i, r in ed.iterrows():
-                if i in old.index and r['Status'] != old.loc[i, 'Status']:
-                    ed.at[i, 'Last_Updated'] = now
-                    over = (now - pd.to_datetime(r['Deadline']).replace(tzinfo=None)).days
-                    ctx = f"⚠️ Post-Deadline ({over}d late)" if over > 0 else "✅ On-Schedule"
-                    new_log = pd.DataFrame([{"Timestamp": now.strftime("%Y-%m-%d %H:%M:%S"), "MRA_ID": r['MRA_ID'], "Event": "Status Change", "Prev": old.loc[i, 'Status'], "New": r['Status'], "Audit_Context": ctx}])
+    with tab_ledger:
+        st.subheader("Interactive Remediation Ledger")
+        old_df = st.session_state.mra_data.copy()
+        edited_df = st.data_editor(st.session_state.mra_data, use_container_width=True, num_rows="dynamic", key="led_edit",
+                                   column_config={"Theme": st.column_config.SelectboxColumn(options=list(THEME_REFS.keys()) + ["General / Other"]),
+                                                  "Days_Since_Update": st.column_config.NumberColumn("Age (Days)", disabled=True)})
+        if not edited_df.equals(old_df):
+            today = datetime.now().replace(tzinfo=None)
+            for idx, row in edited_df.iterrows():
+                if idx in old_df.index and row['Status'] != old_df.loc[idx, 'Status']:
+                    edited_df.at[idx, 'Last_Updated'] = today
+                    over_days = (today - pd.to_datetime(row['Deadline']).replace(tzinfo=None)).days
+                    ctx = f"⚠️ Post-Deadline ({over_days}d late)" if over_days > 0 else "✅ On-Schedule"
+                    new_log = pd.DataFrame([{"Timestamp": today.strftime("%Y-%m-%d %H:%M:%S"), "MRA_ID": row['MRA_ID'], "Event": "Status Change", "Prev": old_df.loc[idx, 'Status'], "New": row['Status'], "Audit_Context": ctx}])
                     st.session_state.audit_log = pd.concat([st.session_state.audit_log, new_log], ignore_index=True)
-            st.session_state.mra_data = apply_sentinel_logic(ed)
+            st.session_state.mra_data = apply_sentinel_logic(edited_df)
 
-    with tabs[2]:
-        rdf = st.session_state.mra_data.copy()
-        rdf['Chart_Risk'] = rdf['Risk_Status'].str.replace("🧊 STALE: ", "")
-        gantt = alt.Chart(rdf.dropna(subset=['Start_Date', 'Deadline'])).mark_bar().encode(
-            x='Start_Date:T', x2='Deadline:T', y=alt.Y('MRA_ID:N', title=None),
-            color=alt.Color('Chart_Risk:N', scale=alt.Scale(domain=["💀 OVERDUE", "🚨 CRITICAL", "⚠️ WARNING", "🟢 On Track", "✅ Closed"], range=["#000000", "#FF4B4B", "#FFAA00", "#00CC96", "#2E7D32"])),
-            tooltip=['MRA_ID', 'Owner', 'Status', 'Days_Since_Update']
-        ).properties(height=alt.Step(40)).interactive()
-        st.altair_chart(gantt, use_container_width=True)
+    with tab_roadmap:
+        st.subheader("Chronological Roadmap")
+        roadmap_df = st.session_state.mra_data.copy()
+        roadmap_df['Chart_Risk'] = roadmap_df['Risk_Status'].str.replace("🧊 STALE: ", "")
+        roadmap_df = roadmap_df.dropna(subset=['Start_Date', 'Deadline'])
+        if not roadmap_df.empty:
+            gantt = alt.Chart(roadmap_df).mark_bar().encode(
+                x=alt.X('Start_Date:T', title='Timeline'),
+                x2='Deadline:T',
+                y=alt.Y('MRA_ID:N', sort='ascending', title=None),
+                color=alt.Color('Chart_Risk:N', scale=alt.Scale(domain=["💀 OVERDUE", "🚨 CRITICAL: 75%+", "⚠️ WARNING: 50%+", "🟢 On Track", "✅ Closed"], range=["#000000", "#FF4B4B", "#FFAA00", "#00CC96", "#2E7D32"])),
+                tooltip=['MRA_ID', 'Theme', 'Owner', 'Status', 'Days_Since_Update']
+            ).properties(height=alt.Step(40)).interactive()
+            st.altair_chart(gantt, use_container_width=True)
 
-    with tabs[3]:
-        crit = st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀|🧊")]
-        if not crit.empty:
-            target = st.selectbox("Select MRA for Alert:", crit['MRA_ID'])
-            r = crit[crit['MRA_ID'] == target].iloc[0]
-            st.text_area("Email Draft", f"Subject: URGENT: {r['MRA_ID']} Alert\n\nDear {r['Owner']},\n\nFinding {r['MRA_ID']} is flagged as {r['Risk_Status']}.\nDeadline: {r['Deadline'].strftime('%Y-%m-%d')}\nDays Since Last Update: {int(r['Days_Since_Update'])}\n\nPlease update status immediately.", height=150)
+    with tab_alerts:
+        critical = st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀|🧊")]
+        if not critical.empty:
+            target = st.selectbox("Select MRA for Alert:", critical['MRA_ID'])
+            row = critical[critical['MRA_ID'] == target].iloc[0]
+            email = f"Subject: URGENT: {row['MRA_ID']} Alert\n\nDear {row['Owner']},\n\nFinding {row['MRA_ID']} is flagged as {row['Risk_Status']}.\nDeadline: {row['Deadline'].strftime('%Y-%m-%d')}\nDays Since Last Update: {int(row['Days_Since_Update'])}\n\nPlease update status immediately."
+            st.text_area("Draft Notification", email, height=180)
 
-    with tabs[4]:
+    with tab_audit:
         st.dataframe(st.session_state.audit_log, use_container_width=True)
         st.download_button("📥 Export Audit Log", convert_df_to_csv(st.session_state.audit_log), "MRA_Audit.csv", "text/csv")
 
