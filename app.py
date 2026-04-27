@@ -79,20 +79,20 @@ st.title("🛡️ MRA Sentinel: Command Center")
 if "mra_data" not in st.session_state:
     st.session_state.mra_data = pd.DataFrame()
 if "audit_log" not in st.session_state:
-    st.session_state.audit_log = pd.DataFrame(columns=["Timestamp", "MRA_ID", "Event", "Previous_Status", "New_Status"])
+    # Added "Overdue_Context" column
+    st.session_state.audit_log = pd.DataFrame(columns=["Timestamp", "MRA_ID", "Event", "Previous_Status", "New_Status", "Overdue_Context"])
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
 
 # Sidebar
 st.sidebar.header("Sentinel Controls")
-
 if st.sidebar.button("📁 Clear Uploaded Files"):
     st.session_state.uploader_key += 1
     st.rerun()
 
 if st.sidebar.button("🗑️ Reset Master Tracker"):
     st.session_state.mra_data = pd.DataFrame()
-    st.session_state.audit_log = pd.DataFrame(columns=["Timestamp", "MRA_ID", "Event", "Previous_Status", "New_Status"])
+    st.session_state.audit_log = pd.DataFrame(columns=["Timestamp", "MRA_ID", "Event", "Previous_Status", "New_Status", "Overdue_Context"])
     st.session_state.uploader_key += 1
     st.rerun()
 
@@ -108,7 +108,6 @@ if uploaded_files:
 if not st.session_state.mra_data.empty:
     # 1. ANALYTICS
     st.subheader("📊 Portfolio Risk Analytics")
-    # FIX: Explicitly defined columns as (2) to prevent TypeError
     col1, col2 = st.columns(2) 
     
     with col1:
@@ -127,33 +126,31 @@ if not st.session_state.mra_data.empty:
         ).properties(height=180)
         st.altair_chart(heat_chart, use_container_width=True)
 
-    # 2. LEDGER (With Audit Tracking)
+    # 2. LEDGER (With Enhanced Audit Tracking)
     st.subheader("📋 Centralized Remediation Ledger")
     
-    # Store old status to detect changes
     old_df = st.session_state.mra_data.copy()
+    edited_df = st.data_editor(st.session_state.mra_data, use_container_width=True, num_rows="dynamic", key="main_editor")
     
-    edited_df = st.data_editor(
-        st.session_state.mra_data, 
-        use_container_width=True, 
-        num_rows="dynamic",
-        key="main_editor"
-    )
-    
-    # Audit Check: Detect Status Transitions
     if not edited_df.equals(old_df):
+        today = datetime.now().replace(tzinfo=None)
         for idx, row in edited_df.iterrows():
             if idx in old_df.index:
                 if row['Status'] != old_df.loc[idx, 'Status']:
+                    # Calculate if this change is happening after the deadline
+                    deadline = pd.to_datetime(row['Deadline']).replace(tzinfo=None)
+                    overdue_days = (today - deadline).days
+                    context = f"⚠️ Post-Deadline ({overdue_days} days late)" if overdue_days > 0 else "✅ On-Schedule"
+                    
                     new_entry = pd.DataFrame([{
-                        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "Timestamp": today.strftime("%Y-%m-%d %H:%M:%S"),
                         "MRA_ID": row['MRA_ID'],
                         "Event": "Status Change",
                         "Previous_Status": old_df.loc[idx, 'Status'],
-                        "New_Status": row['Status']
+                        "New_Status": row['Status'],
+                        "Overdue_Context": context
                     }])
                     st.session_state.audit_log = pd.concat([st.session_state.audit_log, new_entry], ignore_index=True)
-        # Apply edits back to master
         st.session_state.mra_data = apply_sentinel_logic(edited_df)
 
     # 3. ROADMAP & AUDIT TRAIL TABS
@@ -174,17 +171,30 @@ if not st.session_state.mra_data.empty:
         st.altair_chart(gantt, use_container_width=True)
 
     with tab2:
-        critical_items = st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨")]
+        critical_items = st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀")]
         if not critical_items.empty:
             target = st.selectbox("Select MRA for Alert:", critical_items['MRA_ID'])
             row = critical_items[critical_items['MRA_ID'] == target].iloc[0]
-            st.text_area("Draft Notification", f"Subject: URGENT: Remediation Alert [{row['MRA_ID']}]\n\nDear {row['Owner']},\n\nFinding {row['MRA_ID']} is at CRITICAL risk ({int(row['Days_Remaining'])} days remaining).\nDeadline: {row['Deadline'].strftime('%Y-%m-%d')}\n\nPlease update status immediately.", height=150)
+            
+            # Smart email body based on Overdue vs Critical
+            status_label = "OVERDUE" if row['Days_Remaining'] < 0 else "CRITICAL"
+            email_body = f"""Subject: URGENT: {status_label} Remediation Alert [{row['MRA_ID']}]
+
+Dear {row['Owner']},
+
+Finding {row['MRA_ID']} is currently flagged as {status_label}.
+Deadline: {row['Deadline'].strftime('%Y-%m-%d')}
+Days Remaining/Overdue: {int(row['Days_Remaining'])}
+
+Please provide an updated remediation plan and status immediately."""
+            st.text_area("Draft Notification", email_body, height=180)
         else:
             st.success("No critical alerts required.")
 
     with tab3:
         st.subheader("Historical Log of Status Changes")
         if not st.session_state.audit_log.empty:
+            # Highlight overdue context in the dataframe display
             st.dataframe(st.session_state.audit_log, use_container_width=True)
             st.download_button("📥 Export Audit Log", convert_df_to_csv(st.session_state.audit_log), "MRA_Audit_Trail.csv", "text/csv")
         else:
