@@ -41,6 +41,7 @@ def extract_mra_from_pdf(pdf_bytes):
     extracted_findings = []
     for i, date_str in enumerate(date_matches):
         try:
+            # Standardize date format for pandas
             deadline = pd.to_datetime(date_str)
         except:
             deadline = datetime.now() + timedelta(days=90)
@@ -67,8 +68,13 @@ def apply_early_warning(df):
     
     def calculate_risk(row):
         if row['Status'] == "Closed": return "✅ Closed"
-        total_window = (row['Deadline'] - row['Start_Date']).days
-        elapsed = (today - row['Start_Date']).days
+        
+        # Ensure we are working with datetime objects for subtraction
+        deadline = pd.to_datetime(row['Deadline'])
+        start = pd.to_datetime(row['Start_Date'])
+        
+        total_window = (deadline - start).days
+        elapsed = (today - start).days
         burn_rate = elapsed / total_window if total_window > 0 else 1
         
         if burn_rate >= 0.75: return "🚨 CRITICAL: 75%+ Time Elapsed"
@@ -92,6 +98,13 @@ if uploaded_file:
         df = apply_early_warning(df)
 
     if not df.empty:
+        # --- FIX: Ensure Deadline is Datetime for Plotly ---
+        df['Deadline'] = pd.to_datetime(df['Deadline'], errors='coerce')
+        df['Start_Date'] = pd.to_datetime(df['Start_Date'], errors='coerce')
+        
+        # Drop rows with invalid dates to prevent px.timeline from crashing
+        chart_df = df.dropna(subset=['Start_Date', 'Deadline'])
+
         # Action Bar: Download Button
         csv_data = convert_df_to_csv(df)
         st.download_button(
@@ -105,27 +118,32 @@ if uploaded_file:
         m1, m2, m3 = st.columns(3)
         m1.metric("Findings Identified", len(df))
         m2.metric("High Risk (EWS)", len(df[df['Risk_Status'].str.contains("🚨")]))
-        m3.metric("Detected Agency", df['Agency'].iloc[0])
+        # Fixed: accessing scalar value from the first row
+        m3.metric("Detected Agency", str(df['Agency'].iloc[0]))
 
         # Gantt Visualization
         st.subheader("Remediation Roadmap")
-        fig = px.timeline(
-            df, 
-            start="Start_Date", 
-            end="Deadline", 
-            x_start="Start_Date", 
-            x_end="Deadline", 
-            y="MRA_ID", 
-            color="Risk_Status",
-            color_discrete_map={
-                "🚨 CRITICAL: 75%+ Time Elapsed": "#FF4B4B",
-                "⚠️ WARNING: 50% Time Elapsed": "#FFAA00",
-                "🟢 On Track": "#00CC96"
-            },
-            hover_data=["Owner", "Deadline"]
-        )
-        fig.update_yaxes(autorange="reversed")
-        st.plotly_chart(fig, use_container_width=True)
+        if not chart_df.empty:
+            fig = px.timeline(
+                chart_df, 
+                start="Start_Date", 
+                end="Deadline", 
+                x_start="Start_Date", 
+                x_end="Deadline", 
+                y="MRA_ID", 
+                color="Risk_Status",
+                color_discrete_map={
+                    "🚨 CRITICAL: 75%+ Time Elapsed": "#FF4B4B",
+                    "⚠️ WARNING: 50% Time Elapsed": "#FFAA00",
+                    "🟢 On Track": "#00CC96",
+                    "✅ Closed": "#2E7D32"
+                },
+                hover_data=["Owner", "Deadline"]
+            )
+            fig.update_yaxes(autorange="reversed")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("No valid dates found to display the timeline.")
 
         # Data View
         st.subheader("Detailed Remediation Ledger")
