@@ -65,5 +65,5 @@ The Sentinel implements a strict governance layer:
 
 ---
 
-**Disclaimer**: This tool is a Proof of Concept (PoC) and should be integrated with your institution's internal single-sign-on (SSO) and secure database protocols for production use.
+**Disclaimer**: This tool is a Proof of Concept (PoC) only and should not be integrated with your institution's internal single-sign-on (SSO) and secure database protocols for production use.
 
