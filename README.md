@@ -1,6 +1,6 @@
-# 🛡️ MRA Sentinel: Regulatory Remediation & Early Warning
+# 🛡️ MRA Sentinel: Regulatory Remediation & Early Warning Proof of Concept (PoC)
 
-### **The Vision**
+### **Proactive Regulatory Tracking*
 The "MRA Sentinel" is a centralized Command Center designed to migrate financial institutions from reactive, fragmented spreadsheet management to a **proactive regulatory defense**. By leveraging Natural Language Processing (NLP) and time-decay logic, the Sentinel ensures that Matters Requiring Attention (MRAs) are remediated well before they escalate into MRIAs or Enforcement Actions.
 
 ---
@@ -19,12 +19,22 @@ The "MRA Sentinel" is a centralized Command Center designed to migrate financial
 * **Strategic Oversight**: Heatmaps identify thematic concentrations (e.g., Cyber vs. AML) and resource bottlenecks.
 
 ---
-
 ## 🛠️ Technical Acumen
 * **Frontend**: [Streamlit](https://streamlit.io) for an interactive, web-based Executive Dashboard.
 * **NLP/Extraction**: [PyMuPDF](https://readthedocs.io) for document parsing and Regex-based thematic mapping.
 * **Visuals**: [Altair](https://github.io) for resilient, declarative Gantt roadmaps and risk heatmaps.
 * **Reporting**: [ReportLab](https://reportlab.com) for automated generation of Executive PDF summaries.
+
+---
+
+## 🛡️ Governance, Security & Data Privacy
+
+Because this tool handles sensitive **Confidential Supervisory Information (CSI)**, the following protocols are recommended for production deployment:
+
+* **Data Residency**: This PoC processes files in-memory. Production must be integrated with the bank’s **Enterprise Data Lake** or a **Private Cloud** instance (AWS/Azure) that meets SOC2 standards.
+* **Access Control (RBAC)**: Implementation requires integration with **Single Sign-On (SSO/Active Directory)** to ensure only authorized Risk and Compliance personnel can view findings.
+* **CSI Compliance**: This tool should be hosted on **internal, non-public servers**. Users must never upload live regulatory documents to public cloud instances.
+* **Audit Persistence**: Production versions should write logs to a **write-once-read-many (WORM)** database to satisfy regulatory requirements for data integrity.
 
 ---
 
@@ -56,3 +66,4 @@ The Sentinel implements a strict governance layer:
 ---
 
 **Disclaimer**: This tool is a Proof of Concept (PoC) and should be integrated with your institution's internal single-sign-on (SSO) and secure database protocols for production use.
+
