@@ -49,16 +49,20 @@ def apply_sentinel_logic(df, auto_fix=False):
     if df.empty: return df
     today = datetime.now().replace(tzinfo=None)
     
+    # Ensure standard datetime formats
     df['Deadline'] = pd.to_datetime(df['Deadline']).dt.tz_localize(None)
     df['Start_Date'] = pd.to_datetime(df['Start_Date']).dt.tz_localize(None)
 
     def process_row(row):
+        # Auto-Fix Inversions
         if auto_fix and row['Start_Date'] >= row['Deadline']:
             row['Start_Date'] = row['Deadline'] - timedelta(days=90)
         
+        # Calculate Delta
         delta = (row['Deadline'] - today).days
         row['Days_Remaining'] = delta if row['Status'] != "Closed" else 0
         
+        # Risk Assessment
         if row['Status'] == "Closed": 
             row['Risk_Status'] = "✅ Closed"
         elif row['Start_Date'] >= row['Deadline']: 
@@ -139,22 +143,23 @@ if not st.session_state.mra_data.empty:
     tab1, tab2 = st.tabs(["🗺️ Strategic Roadmap", "📧 Escalation Alerts"])
     
     with tab1:
-        # --- FIX: HARDENING CHART DATA ---
+        # --- ULTIMATE HARDENING ---
         chart_df = st.session_state.mra_data.copy()
+        
+        # 1. Force Datetime conversion and strip timezones
         chart_df['Deadline'] = pd.to_datetime(chart_df['Deadline']).dt.tz_localize(None)
         chart_df['Start_Date'] = pd.to_datetime(chart_df['Start_Date']).dt.tz_localize(None)
         
-        # Chronology check + drop empty rows
+        # 2. Drop duplicates and invalid chronology (Start must be < End)
+        chart_df = chart_df.drop_duplicates(subset=['MRA_ID'])
         chart_df = chart_df[chart_df['Start_Date'] < chart_df['Deadline']]
+        
+        # 3. Clean string columns and reset index
+        chart_df['MRA_ID'] = chart_df['MRA_ID'].astype(str)
         chart_df = chart_df.dropna(subset=['Start_Date', 'Deadline']).reset_index(drop=True)
 
         if not chart_df.empty:
-            # Force columns to string/numeric explicitly to prevent Plotly TypeErrors
-            chart_df['MRA_ID'] = chart_df['MRA_ID'].astype(str)
-            chart_df['Owner'] = chart_df['Owner'].astype(str)
-            chart_df['Status'] = chart_df['Status'].astype(str)
-            chart_df['Days_Remaining'] = chart_df['Days_Remaining'].astype(float)
-
+            # Simplified Chart call without hover_data dictionary to prevent TypeError
             fig_gantt = px.timeline(
                 chart_df, 
                 start="Start_Date", 
@@ -162,9 +167,7 @@ if not st.session_state.mra_data.empty:
                 x_start="Start_Date", 
                 x_end="Deadline", 
                 y="MRA_ID", 
-                color="Risk_Status", 
-                # Simplified Hover List to fix TypeError
-                hover_data=["Owner", "Status", "Days_Remaining"],
+                color="Risk_Status",
                 color_discrete_map={
                     "🚨 CRITICAL: 75%+ Elapsed": "#FF4B4B", 
                     "⚠️ WARNING: 50% Elapsed": "#FFAA00", 
@@ -175,7 +178,7 @@ if not st.session_state.mra_data.empty:
             fig_gantt.update_yaxes(autorange="reversed")
             st.plotly_chart(fig_gantt, use_container_width=True)
         else:
-            st.warning("Roadmap hidden: Ensure Start Date is before Deadline.")
+            st.warning("Roadmap hidden: All items currently have invalid date ranges or are missing dates.")
 
     with tab2:
         critical_items = st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨")]
