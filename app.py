@@ -19,6 +19,15 @@ THEME_REFS = {
     "Capital/Liquidity": {"keywords": [r"capital", r"liquidity"], "ref": "Reg YY"}
 }
 
+# Standard Color Mapping for Visual Consistency
+RISK_COLORS = {
+    "💀 OVERDUE": "#000000",
+    "🚨 CRITICAL": "#FF4B4B",
+    "⚠️ WARNING": "#FFAA00",
+    "🟢 On Track": "#00CC96",
+    "✅ Closed": "#2E7D32"
+}
+
 def convert_df_to_csv(df):
     return df.to_csv(index=False).encode('utf-8')
 
@@ -27,28 +36,19 @@ def extract_mras_from_pdf(pdf_bytes, filename):
     text = ""
     with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
         for page in doc: text += page.get_text()
-
     agency = "FRB" if REGULATORY_MAP["FRB"]["identifier"] in text else "OCC"
     keywords = REGULATORY_MAP[agency]["keywords"]
     date_matches = re.findall(rf"(?:{'|'.join(keywords)})[:\s]*(\d{{1,2}}/\d{{1,2}}/\d{{2,4}})", text, re.IGNORECASE)
-
     theme, ref = "General / Other", "N/A"
     for t, config in THEME_REFS.items():
         if any(re.search(p, text, re.IGNORECASE) for p in config["keywords"]):
-            theme, ref = t, config["ref"]
-            break
-
+            theme, ref = t, config["ref"]; break
     extracted = []
     today = datetime.now().replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
     for i, date_str in enumerate(date_matches if date_matches else ["Manual Entry"]):
-        try: deadline = pd.to_datetime(date_str).to_pydatetime().replace(tzinfo=None)
-        except: deadline = today + timedelta(days=90)
-        extracted.append({
-            "MRA_ID": f"{agency}-{filename[:5].upper()}-{i+1:02}", 
-            "Theme": theme, "Reg_Reference": ref, "Owner": "LOB Pending", 
-            "Start_Date": today - timedelta(days=30), "Deadline": deadline, 
-            "Status": "In Progress", "Last_Updated": today, "Days_Since_Update": 0
-        })
+        try: dl = pd.to_datetime(date_str).to_pydatetime().replace(tzinfo=None)
+        except: dl = today + timedelta(days=90)
+        extracted.append({"MRA_ID": f"{agency}-{filename[:5].upper()}-{i+1:02}", "Theme": theme, "Reg_Reference": ref, "Owner": "LOB Pending", "Start_Date": today - timedelta(days=30), "Deadline": dl, "Status": "In Progress", "Last_Updated": today, "Days_Since_Update": 0})
     return pd.DataFrame(extracted)
 
 # --- LOGIC ---
@@ -57,23 +57,20 @@ def apply_sentinel_logic(df):
     today = datetime.now().replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
     for c in ["Deadline", "Start_Date", "Last_Updated"]:
         df[c] = pd.to_datetime(df[c], errors='coerce').dt.tz_localize(None)
-    
     def process(row):
         row['Days_Since_Update'] = max(0, (today - row['Last_Updated'].replace(tzinfo=None)).days)
-        stale = "🧊 STALE: " if row['Days_Since_Update'] > 30 and row['Status'] != "Closed" else ""
         delta = (row['Deadline'] - today).days
         row['Days_Remaining'] = delta if row['Status'] != "Closed" else 0
-        
         if row['Status'] == "Closed": row['Risk_Status'] = "✅ Closed"
-        elif delta < 0: row['Risk_Status'] = f"{stale}💀 OVERDUE"
+        elif delta < 0: row['Risk_Status'] = "💀 OVERDUE"
         elif row['Start_Date'] >= row['Deadline']: row['Risk_Status'] = "⚠️ Date Inversion"
         else:
             w = (row['Deadline'] - row['Start_Date']).days
             e = (today - row['Start_Date']).days
             burn = e / w if w > 0 else 1
-            if burn >= 0.75: row['Risk_Status'] = f"{stale}🚨 CRITICAL"
-            elif burn >= 0.50: row['Risk_Status'] = f"{stale}⚠️ WARNING"
-            else: row['Risk_Status'] = f"{stale}🟢 On Track"
+            if burn >= 0.75: row['Risk_Status'] = "🚨 CRITICAL"
+            elif burn >= 0.50: row['Risk_Status'] = "⚠️ WARNING"
+            else: row['Risk_Status'] = "🟢 On Track"
         return row
     return df.apply(process, axis=1)
 
@@ -88,9 +85,7 @@ if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0
 # Sidebar
 if st.sidebar.button("📁 Clear Files"): st.session_state.uploader_key += 1; st.rerun()
 if st.sidebar.button("🗑️ Reset Tracker"): 
-    st.session_state.mra_data = pd.DataFrame(); 
-    st.session_state.audit_log = pd.DataFrame(columns=["Timestamp", "MRA_ID", "Event", "Prev", "New", "Audit_Context"]); 
-    st.rerun()
+    st.session_state.mra_data = pd.DataFrame(); st.session_state.audit_log = pd.DataFrame(columns=["Timestamp", "MRA_ID", "Event", "Prev", "New", "Audit_Context"]); st.rerun()
 
 up = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True, key=f"up_{st.session_state.uploader_key}")
 if up and st.button("🚀 Ingest"):
@@ -108,32 +103,31 @@ if not st.session_state.mra_data.empty:
         
         with c1:
             st.metric("Total MRAs", len(st.session_state.mra_data))
-            # --- NEW: DAYS OVERDUE BENCHMARK ---
             overdue_items = chart_df[chart_df['Days_Remaining'] < 0]
             max_overdue = abs(overdue_items['Days_Remaining'].min()) if not overdue_items.empty else 0
-            st.metric("Max Days Overdue", f"{int(max_overdue)} d", delta_color="inverse")
+            # REMOVED: 'd' suffix as requested
+            st.metric("Max Days Overdue", int(max_overdue), delta_color="inverse")
             
-            # --- FIXED DONUT: Portfolio Health (Current State) ---
+            # DONUT: Added Legend
             st.write("**Portfolio Health Distribution**")
-            donut_data = chart_df['Simple_Risk'].value_counts().reset_index(name='count')
-            donut = alt.Chart(donut_data).mark_arc(innerRadius=50).encode(
-                theta="count:Q",
-                color=alt.Color("Simple_Risk:N", scale=alt.Scale(
-                    domain=["💀 OVERDUE", "🚨 CRITICAL", "⚠️ WARNING", "🟢 On Track", "✅ Closed"],
-                    range=["#000000", "#FF4B4B", "#FFAA00", "#00CC96", "#2E7D32"]
-                ), legend=None),
-                tooltip=["Simple_Risk", "count"]
-            ).properties(height=200)
+            donut = alt.Chart(chart_df).mark_arc(innerRadius=50).encode(
+                theta="count():Q",
+                color=alt.Color("Simple_Risk:N", scale=alt.Scale(domain=list(RISK_COLORS.keys()), range=list(RISK_COLORS.values())), legend=alt.Legend(title="Risk Status", orient="bottom")),
+                tooltip=["Simple_Risk", "count()"]
+            ).properties(height=250)
             st.altair_chart(donut, use_container_width=True)
 
         with c2:
+            # MULTICOLOR HEATMAP: Mapped to Risk Tiers
             heatmap = alt.Chart(chart_df).mark_rect().encode(
-                x=alt.X('Simple_Risk:N', title="Risk Tier", sort=["💀 OVERDUE", "🚨 CRITICAL", "⚠️ WARNING", "🟢 On Track", "✅ Closed"]),
+                x=alt.X('Simple_Risk:N', title="Risk Tier", sort=list(RISK_COLORS.keys())),
                 y=alt.Y('Owner:N', title=None),
-                color=alt.Color('count():Q', scale=alt.Scale(scheme='reds'), title="Freq"),
+                color=alt.Color('Simple_Risk:N', scale=alt.Scale(domain=list(RISK_COLORS.keys()), range=list(RISK_COLORS.values())), legend=None),
                 tooltip=['Owner', 'Simple_Risk', 'count()']
-            ).properties(title="Risk Concentration", height=320, width=450)
-            st.altair_chart(heatmap, use_container_width=False)
+            ).properties(title="Risk Concentration Heatmap", height=350, width=500)
+            
+            text = heatmap.mark_text(baseline='middle').encode(text='count():Q', color=alt.value('white'))
+            st.altair_chart(heatmap + text, use_container_width=False)
 
     with tabs[1]:
         old = st.session_state.mra_data.copy()
@@ -154,17 +148,17 @@ if not st.session_state.mra_data.empty:
         rdf['Chart_Risk'] = rdf['Risk_Status'].str.replace("🧊 STALE: ", "")
         gantt = alt.Chart(rdf.dropna(subset=['Start_Date', 'Deadline'])).mark_bar().encode(
             x='Start_Date:T', x2='Deadline:T', y=alt.Y('MRA_ID:N', title=None),
-            color=alt.Color('Chart_Risk:N', scale=alt.Scale(domain=["💀 OVERDUE", "🚨 CRITICAL", "⚠️ WARNING", "🟢 On Track", "✅ Closed"], range=["#000000", "#FF4B4B", "#FFAA00", "#00CC96", "#2E7D32"])),
-            tooltip=['MRA_ID', 'Owner', 'Status', 'Days_Since_Update', 'Days_Remaining']
+            color=alt.Color('Chart_Risk:N', scale=alt.Scale(domain=list(RISK_COLORS.keys()), range=list(RISK_COLORS.values()))),
+            tooltip=['MRA_ID', 'Owner', 'Status', 'Days_Remaining']
         ).properties(height=alt.Step(40)).interactive()
         st.altair_chart(gantt, use_container_width=True)
 
     with tabs[3]:
-        crit = st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀|🧊")]
+        crit = st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀")]
         if not crit.empty:
             target = st.selectbox("Select MRA for Alert:", crit['MRA_ID'])
             r = crit[crit['MRA_ID'] == target].iloc[0]
-            st.text_area("Email Draft", f"Subject: URGENT: {r['MRA_ID']} Alert\n\nDear {r['Owner']},\n\nFinding {r['MRA_ID']} is flagged as {r['Risk_Status']}.\nDeadline: {r['Deadline'].strftime('%Y-%m-%d')}\nDays Since Last Update: {int(r['Days_Since_Update'])}\nDays Overdue: {abs(int(r['Days_Remaining'])) if r['Days_Remaining'] < 0 else 0}\n\nPlease update status immediately.", height=150)
+            st.text_area("Email Draft", f"Subject: URGENT: {r['MRA_ID']} Alert\n\nDear {r['Owner']},\n\nFinding {r['MRA_ID']} is flagged as {r['Risk_Status']}.\nDeadline: {r['Deadline'].strftime('%Y-%m-%d')}\nDays Overdue: {abs(int(r['Days_Remaining'])) if r['Days_Remaining'] < 0 else 0}\n\nPlease update status immediately.", height=150)
 
     with tabs[4]:
         st.dataframe(st.session_state.audit_log, use_container_width=True)
