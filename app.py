@@ -25,7 +25,6 @@ def extract_mras_from_pdf(pdf_bytes, filename):
     date_matches = re.findall(rf"(?:{'|'.join(keywords)})[:\s]*(\d{{1,2}}/\d{{1,2}}/\d{{2,4}})", text, re.IGNORECASE)
 
     extracted_findings = []
-    # Start date defaults to yesterday; Deadline defaults to +90 days
     default_start = (datetime.now() - timedelta(days=1)).replace(tzinfo=None)
     loop_dates = date_matches if date_matches else ["Manual Entry Needed"]
     
@@ -54,15 +53,12 @@ def apply_sentinel_logic(df, auto_fix=False):
     df['Start_Date'] = pd.to_datetime(df['Start_Date']).dt.tz_localize(None)
 
     def process_row(row):
-        # 1. Auto-Fix Date Inversions
         if auto_fix and row['Start_Date'] >= row['Deadline']:
             row['Start_Date'] = row['Deadline'] - timedelta(days=90)
         
-        # 2. Calculate Days Remaining
         delta = (row['Deadline'] - today).days
         row['Days_Remaining'] = delta if row['Status'] != "Closed" else 0
         
-        # 3. Calculate Risk Status
         if row['Status'] == "Closed": 
             row['Risk_Status'] = "✅ Closed"
         elif row['Start_Date'] >= row['Deadline']: 
@@ -75,7 +71,6 @@ def apply_sentinel_logic(df, auto_fix=False):
             if burn_rate >= 0.75: row['Risk_Status'] = "🚨 CRITICAL: 75%+ Elapsed"
             elif burn_rate >= 0.50: row['Risk_Status'] = "⚠️ WARNING: 50% Elapsed"
             else: row['Risk_Status'] = "🟢 On Track"
-        
         return row
 
     return df.apply(process_row, axis=1)
@@ -84,7 +79,6 @@ def apply_sentinel_logic(df, auto_fix=False):
 st.set_page_config(page_title="MRA Sentinel", layout="wide")
 st.title("🛡️ MRA Sentinel: Command Center")
 
-# Sidebar
 st.sidebar.header("Sentinel Controls")
 auto_fix_enabled = st.sidebar.toggle("Enable Auto-Fix Dates", value=True)
 if st.sidebar.button("🗑️ Clear Master Tracker"):
@@ -94,7 +88,6 @@ if st.sidebar.button("🗑️ Clear Master Tracker"):
 if "mra_data" not in st.session_state:
     st.session_state.mra_data = pd.DataFrame()
 
-# Ingestion
 uploaded_files = st.file_uploader("Batch Upload Regulatory PDFs", type=["pdf"], accept_multiple_files=True)
 if uploaded_files:
     if st.button("🚀 Ingest Findings"):
@@ -114,20 +107,20 @@ if not st.session_state.mra_data.empty:
     
     with col2:
         dist = st.session_state.mra_data['Risk_Status'].value_counts().reset_index()
+        dist.columns = ['Risk_Status', 'count']
         fig_donut = px.pie(dist, values='count', names='Risk_Status', hole=0.5, 
                            color='Risk_Status', color_discrete_map={"🚨 CRITICAL: 75%+ Elapsed": "#FF4B4B", "⚠️ WARNING: 50% Elapsed": "#FFAA00", "🟢 On Track": "#00CC96", "✅ Closed": "#2E7D32"})
         fig_donut.update_layout(showlegend=False, height=220, margin=dict(t=0, b=0, l=0, r=0))
         st.plotly_chart(fig_donut, use_container_width=True)
 
     with col3:
-        # HEATMAP: Updated colors to Financial Navy/Slate
         heatmap_data = st.session_state.mra_data.groupby(['Owner', 'Risk_Status']).size().unstack(fill_value=0)
         fig_heat = px.bar(heatmap_data, title="Risk Concentration by Owner", barmode="stack",
                           color_discrete_sequence=["#1B263B", "#415A77", "#778DA9", "#E0E1DD"])
         fig_heat.update_layout(height=250, margin=dict(t=30, b=0, l=0, r=0), xaxis_title=None, yaxis_title="Count")
         st.plotly_chart(fig_heat, use_container_width=True)
 
-    # 2. LEDGER (With Days Remaining)
+    # 2. LEDGER
     st.subheader("📋 Centralized Remediation Ledger")
     edited_df = st.data_editor(
         st.session_state.mra_data,
@@ -136,7 +129,7 @@ if not st.session_state.mra_data.empty:
         column_config={
             "Status": st.column_config.SelectboxColumn(options=["In Progress", "Submitted for Review", "Closed"]),
             "Deadline": st.column_config.DateColumn(),
-            "Days_Remaining": st.column_config.NumberColumn("Days Remaining", help="Calculated automatically until closed", disabled=True, format="%d d"),
+            "Days_Remaining": st.column_config.NumberColumn("Days Remaining", disabled=True),
             "Risk_Status": st.column_config.TextColumn("Sentinel Assessment", disabled=True)
         }
     )
@@ -146,22 +139,50 @@ if not st.session_state.mra_data.empty:
     tab1, tab2 = st.tabs(["🗺️ Strategic Roadmap", "📧 Escalation Alerts"])
     
     with tab1:
+        # --- FIX: HARDENING CHART DATA ---
         chart_df = st.session_state.mra_data.copy()
-        chart_df = chart_df[chart_df['Start_Date'] < chart_df['Deadline']].reset_index(drop=True)
+        chart_df['Deadline'] = pd.to_datetime(chart_df['Deadline']).dt.tz_localize(None)
+        chart_df['Start_Date'] = pd.to_datetime(chart_df['Start_Date']).dt.tz_localize(None)
+        
+        # Chronology check + drop empty rows
+        chart_df = chart_df[chart_df['Start_Date'] < chart_df['Deadline']]
+        chart_df = chart_df.dropna(subset=['Start_Date', 'Deadline']).reset_index(drop=True)
+
         if not chart_df.empty:
-            fig_gantt = px.timeline(chart_df, start="Start_Date", end="Deadline", x_start="Start_Date", x_end="Deadline", 
-                                    y="MRA_ID", color="Risk_Status", 
-                                    hover_data={"Days_Remaining": True, "Owner": True, "Status": True},
-                                    color_discrete_map={"🚨 CRITICAL: 75%+ Elapsed": "#FF4B4B", "⚠️ WARNING: 50% Elapsed": "#FFAA00", "🟢 On Track": "#00CC96", "✅ Closed": "#2E7D32"})
+            # Force columns to string/numeric explicitly to prevent Plotly TypeErrors
+            chart_df['MRA_ID'] = chart_df['MRA_ID'].astype(str)
+            chart_df['Owner'] = chart_df['Owner'].astype(str)
+            chart_df['Status'] = chart_df['Status'].astype(str)
+            chart_df['Days_Remaining'] = chart_df['Days_Remaining'].astype(float)
+
+            fig_gantt = px.timeline(
+                chart_df, 
+                start="Start_Date", 
+                end="Deadline", 
+                x_start="Start_Date", 
+                x_end="Deadline", 
+                y="MRA_ID", 
+                color="Risk_Status", 
+                # Simplified Hover List to fix TypeError
+                hover_data=["Owner", "Status", "Days_Remaining"],
+                color_discrete_map={
+                    "🚨 CRITICAL: 75%+ Elapsed": "#FF4B4B", 
+                    "⚠️ WARNING: 50% Elapsed": "#FFAA00", 
+                    "🟢 On Track": "#00CC96", 
+                    "✅ Closed": "#2E7D32"
+                }
+            )
             fig_gantt.update_yaxes(autorange="reversed")
             st.plotly_chart(fig_gantt, use_container_width=True)
+        else:
+            st.warning("Roadmap hidden: Ensure Start Date is before Deadline.")
 
     with tab2:
         critical_items = st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨")]
         if not critical_items.empty:
             target = st.selectbox("Select MRA for Alert:", critical_items['MRA_ID'])
             row = critical_items[critical_items['MRA_ID'] == target].iloc[0]
-            st.text_area("Draft Notification", f"Subject: URGENT: Remediation Alert [{row['MRA_ID']}]\n\nDear {row['Owner']},\n\nFinding {row['MRA_ID']} is at CRITICAL risk ({row['Days_Remaining']} days remaining).\nDeadline: {row['Deadline'].strftime('%Y-%m-%d')}\n\nPlease update status immediately.", height=150)
+            st.text_area("Draft Notification", f"Subject: URGENT: Remediation Alert [{row['MRA_ID']}]\n\nDear {row['Owner']},\n\nFinding {row['MRA_ID']} is at CRITICAL risk ({int(row['Days_Remaining'])} days remaining).\nDeadline: {row['Deadline'].strftime('%Y-%m-%d')}\n\nPlease update status immediately.", height=150)
         else:
             st.success("Portfolio healthy. No alerts required.")
 
