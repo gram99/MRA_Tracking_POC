@@ -35,7 +35,6 @@ def extract_mra_from_pdf(pdf_bytes):
     date_matches = re.findall(rf"(?:{deadline_pattern})[:\s]*(\d{{1,2}}/\d{{1,2}}/\d{{2,4}})", text, re.IGNORECASE)
 
     extracted_findings = []
-    # If no dates found, create one dummy finding so the app doesn't stay empty
     if not date_matches:
         date_matches = [(datetime.now() + timedelta(days=90)).strftime("%m/%d/%Y")]
 
@@ -43,13 +42,13 @@ def extract_mra_from_pdf(pdf_bytes):
         try:
             deadline = pd.to_datetime(date_str).replace(tzinfo=None)
         except:
-            deadline = datetime.now().replace(tzinfo=None) + timedelta(days=90)
+            deadline = (datetime.now() + timedelta(days=90)).replace(tzinfo=None)
 
         extracted_findings.append({
             "MRA_ID": f"{agency}-2024-{i+1:03}",
             "Agency": agency,
             "Owner": "Assignee Pending",
-            "Start_Date": datetime.now().replace(tzinfo=None) - timedelta(days=10),
+            "Start_Date": (datetime.now() - timedelta(days=10)).replace(tzinfo=None),
             "Deadline": deadline,
             "Status": "In Progress"
         })
@@ -60,16 +59,13 @@ def apply_early_warning(df):
     if df.empty: return df
     today = datetime.now().replace(tzinfo=None)
     
-    # Ensure dates are datetime objects before math
+    # Standardize types before processing
     df['Deadline'] = pd.to_datetime(df['Deadline']).dt.tz_localize(None)
     df['Start_Date'] = pd.to_datetime(df['Start_Date']).dt.tz_localize(None)
 
     def calculate_risk(row):
         if row['Status'] == "Closed": return "✅ Closed"
-        
-        # Guard against NaT (Not a Time)
-        if pd.isnull(row['Deadline']) or pd.isnull(row['Start_Date']):
-            return "⚪ Missing Dates"
+        if pd.isnull(row['Deadline']) or pd.isnull(row['Start_Date']): return "⚪ Missing Dates"
 
         total_window = (row['Deadline'] - row['Start_Date']).days
         elapsed = (today - row['Start_Date']).days
@@ -99,7 +95,7 @@ if uploaded_file:
 if not st.session_state.mra_data.empty:
     st.subheader("Interactive Remediation Ledger")
     
-    # Enable editing
+    # Data Editor
     edited_df = st.data_editor(
         st.session_state.mra_data,
         column_config={
@@ -109,24 +105,27 @@ if not st.session_state.mra_data.empty:
         },
         use_container_width=True,
         num_rows="dynamic",
-        key="editor"
+        key="mra_editor"
     )
     
-    # Re-apply risk logic to edited data
+    # Re-sync and re-calculate risk
     st.session_state.mra_data = apply_early_warning(edited_df)
 
-    # 2. GANTT CHART (Hardened against nulls)
+    # 2. GANTT CHART (Ultra-Hardened)
     st.subheader("Remediation Roadmap")
     
-    # Final data cleaning for Plotly
+    # Create a clean chart-only dataframe
     chart_df = st.session_state.mra_data.copy()
-    chart_df['Deadline'] = pd.to_datetime(chart_df['Deadline'], errors='coerce')
-    chart_df['Start_Date'] = pd.to_datetime(chart_df['Start_Date'], errors='coerce')
-    
-    # CRITICAL: Drop any row that doesn't have a valid Start and End date
+    chart_df['Deadline'] = pd.to_datetime(chart_df['Deadline']).dt.tz_localize(None)
+    chart_df['Start_Date'] = pd.to_datetime(chart_df['Start_Date']).dt.tz_localize(None)
     chart_df = chart_df.dropna(subset=['Start_Date', 'Deadline'])
+    chart_df = chart_df.reset_index(drop=True) # Reset index to avoid Plotly KeyError
 
     if not chart_df.empty:
+        # Convert columns to simple types to satisfy Plotly
+        chart_df['MRA_ID'] = chart_df['MRA_ID'].astype(str)
+        chart_df['Risk_Status'] = chart_df['Risk_Status'].astype(str)
+
         fig = px.timeline(
             chart_df, 
             start="Start_Date", 
@@ -141,17 +140,16 @@ if not st.session_state.mra_data.empty:
                 "🟢 On Track": "#00CC96",
                 "✅ Closed": "#2E7D32",
                 "⚪ Missing Dates": "#808080"
-            },
-            hover_data=["Owner", "Status"]
+            }
         )
         fig.update_yaxes(autorange="reversed")
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.warning("Please ensure all rows have valid 'Start_Date' and 'Deadline' to view the roadmap.")
+        st.warning("Roadmap hidden: Ensure all rows have valid start and end dates.")
 
     st.download_button(
-        label="📥 Export Final Ledger to CSV",
+        label="📥 Export Ledger to CSV",
         data=convert_df_to_csv(st.session_state.mra_data),
-        file_name=f"MRA_Sentinel_Export.csv",
+        file_name="MRA_Sentinel_Export.csv",
         mime='text/csv'
     )
