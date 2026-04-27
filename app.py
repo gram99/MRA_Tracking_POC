@@ -25,6 +25,7 @@ def extract_mras_from_pdf(pdf_bytes, filename):
     date_matches = re.findall(rf"(?:{'|'.join(keywords)})[:\s]*(\d{{1,2}}/\d{{1,2}}/\d{{2,4}})", text, re.IGNORECASE)
 
     extracted_findings = []
+    # Standardizing dates for the current 2026 system date
     today_naive = datetime.now().replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
     
     for i, date_str in enumerate(date_matches if date_matches else ["Manual Entry"]):
@@ -43,10 +44,11 @@ def extract_mras_from_pdf(pdf_bytes, filename):
     return pd.DataFrame(extracted_findings)
 
 # --- EARLY WARNING & LOGIC ---
-def apply_sentinel_logic(df, auto_fix=False):
+def apply_sentinel_logic(df):
     if df.empty: return df
     today = datetime.now().replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
     
+    # Force clean datetime types
     df['Deadline'] = pd.to_datetime(df['Deadline']).dt.tz_localize(None)
     df['Start_Date'] = pd.to_datetime(df['Start_Date']).dt.tz_localize(None)
 
@@ -78,12 +80,12 @@ st.title("🛡️ MRA Sentinel: Command Center")
 if "mra_data" not in st.session_state:
     st.session_state.mra_data = pd.DataFrame()
 
-# Sidebar
-if st.sidebar.button("🗑️ Clear Tracker"):
+# Sidebar reset
+if st.sidebar.button("🗑️ Clear Master Tracker"):
     st.session_state.mra_data = pd.DataFrame()
     st.rerun()
 
-uploaded_files = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Batch Upload PDFs", type=["pdf"], accept_multiple_files=True)
 if uploaded_files:
     if st.button("🚀 Ingest Findings"):
         new_recs = [extract_mras_from_pdf(f.read(), f.name) for f in uploaded_files]
@@ -96,8 +98,8 @@ if not st.session_state.mra_data.empty:
     col1, col2, col3 = st.columns([1, 1.5, 2])
     with col1:
         st.metric("Master Inventory", len(st.session_state.mra_data))
-        risk_c = len(st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀")])
-        st.metric("Risk Items", risk_c, delta_color="inverse")
+        risk_items = len(st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀")])
+        st.metric("Risk Portfolio", risk_items, delta_color="inverse")
     with col2:
         dist = st.session_state.mra_data['Risk_Status'].value_counts().reset_index()
         fig_donut = px.pie(dist, values='count', names='Risk_Status', hole=0.5, 
@@ -116,25 +118,26 @@ if not st.session_state.mra_data.empty:
     # 3. ROADMAP
     tab1, tab2 = st.tabs(["🗺️ Strategic Roadmap", "📧 Alerts"])
     with tab1:
-        # --- THE CHART FIREWALL ---
+        # --- THE FIX: VISUAL CHRONOLOGY GUARD ---
         chart_df = st.session_state.mra_data.copy()
-        chart_df['Deadline'] = pd.to_datetime(chart_df['Deadline']).dt.tz_localize(None)
-        chart_df['Start_Date'] = pd.to_datetime(chart_df['Start_Date']).dt.tz_localize(None)
         
-        # 1. Drop NaT values that break Plotly
+        # Force conversion and drop bad data immediately
+        chart_df['Deadline'] = pd.to_datetime(chart_df['Deadline'], errors='coerce').dt.tz_localize(None)
+        chart_df['Start_Date'] = pd.to_datetime(chart_df['Start_Date'], errors='coerce').dt.tz_localize(None)
         chart_df = chart_df.dropna(subset=['Start_Date', 'Deadline'])
-        
-        # 2. FORCE VALID DURATION: If Start >= End, artificially set Start to 30 days before End
-        def force_visual_duration(row):
+
+        # FIX: If Start >= End, artificially set Start to 30 days before End for the chart only
+        def force_positive_duration(row):
             if row['Start_Date'] >= row['Deadline']:
                 row['Start_Date'] = row['Deadline'] - timedelta(days=30)
             return row
         
-        chart_df = chart_df.apply(force_visual_duration, axis=1)
+        chart_df = chart_df.apply(force_positive_duration, axis=1)
         chart_df['MRA_ID'] = chart_df['MRA_ID'].astype(str)
         chart_df = chart_df.reset_index(drop=True)
 
         if not chart_df.empty:
+            # Cleanest possible call to prevent TypeError
             fig_gantt = px.timeline(
                 chart_df, 
                 start="Start_Date", 
@@ -143,11 +146,18 @@ if not st.session_state.mra_data.empty:
                 x_end="Deadline", 
                 y="MRA_ID", 
                 color="Risk_Status",
-                color_discrete_map={"💀 OVERDUE": "#000000", "🚨 CRITICAL: 75%+ Elapsed": "#FF4B4B", "⚠️ WARNING: 50% Elapsed": "#FFAA00", "🟢 On Track": "#00CC96", "✅ Closed": "#2E7D32"}
+                color_discrete_map={
+                    "💀 OVERDUE": "#000000", 
+                    "🚨 CRITICAL: 75%+ Elapsed": "#FF4B4B", 
+                    "⚠️ WARNING: 50% Elapsed": "#FFAA00", 
+                    "🟢 On Track": "#00CC96", 
+                    "✅ Closed": "#2E7D32",
+                    "❌ Date Inversion": "#808080"
+                }
             )
             fig_gantt.update_yaxes(autorange="reversed")
             st.plotly_chart(fig_gantt, use_container_width=True)
         else:
-            st.warning("Roadmap hidden: No valid items to display.")
+            st.warning("Roadmap hidden: All items currently have invalid or missing dates.")
 
-    st.download_button("📥 Export CSV", convert_df_to_csv(st.session_state.mra_data), "MRA_Sentinel_Export.csv", "text/csv")
+    st.download_button("📥 Export CSV Tracker", convert_df_to_csv(st.session_state.mra_data), "MRA_Sentinel_Tracker.csv", "text/csv")
