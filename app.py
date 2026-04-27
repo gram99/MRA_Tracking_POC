@@ -4,96 +4,127 @@ import plotly.express as px
 import fitz  # PyMuPDF
 import re
 from datetime import datetime, timedelta
-import io
 
-# --- NLP & EXTRACTION LOGIC ---
+# --- CONFIGURATION & REGEX DICTIONARY ---
+REGULATORY_MAP = {
+    "OCC": {
+        "headers": [r"Concern", r"Cause", r"Consequence", r"Corrective Action", r"Commitment"],
+        "deadline_keywords": [r"Target Date", r"Commitment Date", r"Completion Date"],
+        "identifier": "Comptroller"
+    },
+    "FRB": {
+        "headers": [r"Matter Requiring Attention", r"Matter Requiring Immediate Attention", r"Required Action"],
+        "deadline_keywords": [r"Timeline", r"Due Date", r"Expectation Date"],
+        "identifier": "Federal Reserve"
+    }
+}
+
+# --- LOGIC: EXTRACTION ENGINE ---
 def extract_mra_from_pdf(pdf_bytes):
-    """
-    Parses PDF bytes, extracts text, and maps findings to owners/deadlines.
-    """
     text = ""
-    # Open the PDF from memory
     with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
         for page in doc:
             text += page.get_text()
 
-    # 1. Look for Agency-Specific Patterns
-    is_occ = any(term in text.upper() for term in ["OCC", "COMPTROLLER"])
-    is_frb = any(term in text.upper() for term in ["FRB", "FEDERAL RESERVE"])
+    # Determine Agency
+    agency = "FRB" if REGULATORY_MAP["FRB"]["identifier"] in text else "OCC"
+    config = REGULATORY_MAP[agency]
 
-    # 2. Heuristic: Find Dates (e.g., 12/31/2024 or Dec 31, 2024)
-    date_pattern = r"(\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2},? \d{4}\b)"
-    found_dates = re.findall(date_pattern, text)
-    
-    # 3. Heuristic: Identify Findings (Simplified for MVP)
-    # Looks for "MRA #X" or "Finding X"
-    finding_titles = re.findall(r"(MRA\s*#?\s*\d+|Matter\s*Requiring\s*Attention\s*\d*)", text, re.IGNORECASE)
-    
-    # Construct Mock Data based on extraction
-    # In a full build, you'd map the text between findings to specific owners via spaCy
-    extracted_data = []
-    for i, title in enumerate(finding_titles[:3]):  # Limit to first 3 for demo
-        deadline = datetime.now() + timedelta(days=90)
-        if len(found_dates) > i:
-            try: deadline = pd.to_datetime(found_dates[i])
-            except: pass
-            
-        extracted_data.append({
-            "MRA_ID": title if title else f"MRA-2024-{i+1}",
-            "Agency": "OCC" if is_occ else "FRB" if is_frb else "Unknown",
-            "Owner": "Line of Business Lead" if i % 2 == 0 else "Risk/Compliance Officer",
-            "Start_Date": datetime.now() - timedelta(days=15),
+    # NLP Logic: Find deadlines based on agency-specific keywords
+    deadline_pattern = "|".join(config["deadline_keywords"])
+    # Regex looks for the keyword, optional punctuation, and a date (MM/DD/YYYY)
+    date_matches = re.findall(rf"(?:{deadline_pattern})[:\s]*(\d{{1,2}}/\d{{1,2}}/\d{{2,4}})", text, re.IGNORECASE)
+
+    extracted_findings = []
+    for i, date_str in enumerate(date_matches):
+        try:
+            deadline = pd.to_datetime(date_str)
+        except:
+            deadline = datetime.now() + timedelta(days=90)
+
+        extracted_findings.append({
+            "MRA_ID": f"{agency}-2024-{i+1:03}",
+            "Agency": agency,
+            "Finding_Summary": f"Extracted from {agency} Letter",
+            "Owner": "Assignee Pending",
+            "Start_Date": datetime.now() - timedelta(days=10),
             "Deadline": deadline,
             "Status": "In Progress"
         })
 
-    return pd.DataFrame(extracted_data), text
-
-# --- EARLY WARNING LOGIC ---
-def apply_early_warning(df):
-    today = datetime.now()
-    def calculate_risk(row):
-        if row['Status'] == "Closed": return "✅ Closed"
-        total_days = (row['Deadline'] - row['Start_Date']).days
-        elapsed = (today - row['Start_Date']).days
-        burn = elapsed / total_days if total_days > 0 else 1
+    if not extracted_findings: # Fallback for empty/unstructured text
+        return pd.DataFrame(), text
         
-        if burn >= 0.75: return "🚨 CRITICAL: 75%+ Elapsed"
-        if burn >= 0.50: return "⚠️ WARNING: 50%+ Elapsed"
-        return "🟢 On Track"
+    return pd.DataFrame(extracted_findings), text
+
+# --- LOGIC: EARLY WARNING SYSTEM (EWS) ---
+def apply_early_warning(df):
+    if df.empty: return df
+    today = datetime.now()
     
+    def calculate_risk(row):
+        total_window = (row['Deadline'] - row['Start_Date']).days
+        elapsed = (today - row['Start_Date']).days
+        burn_rate = elapsed / total_window if total_window > 0 else 1
+        
+        if burn_rate >= 0.75: return "🚨 CRITICAL: 75%+ Time Elapsed"
+        if burn_rate >= 0.50: return "⚠️ WARNING: 50% Time Elapsed"
+        return "🟢 On Track"
+
     df['Risk_Status'] = df.apply(calculate_risk, axis=1)
     return df
 
-# --- STREAMLIT UI ---
+# --- STREAMLIT DASHBOARD UI ---
 st.set_page_config(page_title="MRA Sentinel", layout="wide")
-st.title("🛡️ MRA Sentinel: Command Center")
 
-uploaded_file = st.file_uploader("Upload Regulatory PDF (OCC/FRB)", type=["pdf"])
+st.title("🛡️ MRA Sentinel: Command Center")
+st.markdown("### Automated Regulatory Ingestion & Early Warning Tracker")
+
+# Sidebar
+st.sidebar.header("Sentinel Controls")
+st.sidebar.info("This system uses Custom Regex Mapping for OCC & FRB exam letters.")
+
+uploaded_file = st.file_uploader("Upload Regulatory PDF (OCC or FRB)", type=["pdf"])
 
 if uploaded_file:
-    df, full_text = extract_mra_from_pdf(uploaded_file.read())
-    df = apply_early_warning(df)
+    # Processing
+    with st.spinner("Executing Sentinel Scan..."):
+        df, raw_text = extract_mra_from_pdf(uploaded_file.read())
+        df = apply_early_warning(df)
 
-    # Dashboard Metrics
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Findings Detected", len(df))
-    m2.metric("High Risk Items", len(df[df['Risk_Status'].str.contains("🚨")]))
-    m3.metric("Avg. Time to Deadline", f"{(df['Deadline'] - datetime.now()).mean().days} Days")
+    if not df.empty:
+        # Metrics
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Findings Identified", len(df))
+        m2.metric("High Risk (EWS)", len(df[df['Risk_Status'].str.contains("🚨")]))
+        m3.metric("Detected Agency", df['Agency'].iloc[0])
 
-    # Gantt Visualization
-    st.subheader("Remediation Tracker")
-    fig = px.timeline(df, start="Start_Date", end="Deadline", x_start="Start_Date", x_end="Deadline", 
-                      y="MRA_ID", color="Risk_Status", 
-                      color_discrete_map={"🚨 CRITICAL: 75%+ Elapsed": "#FF4B4B", "⚠️ WARNING: 50%+ Elapsed": "#FFAA00", "🟢 On Track": "#00CC96"},
-                      hover_data=["Owner", "Agency"])
-    st.plotly_chart(fig, use_container_width=True)
+        # Gantt Visualization
+        st.subheader("Remediation Roadmap")
+        fig = px.timeline(
+            df, 
+            start="Start_Date", 
+            end="Deadline", 
+            x_start="Start_Date", 
+            x_end="Deadline", 
+            y="MRA_ID", 
+            color="Risk_Status",
+            color_discrete_map={
+                "🚨 CRITICAL: 75%+ Time Elapsed": "#FF4B4B",
+                "⚠️ WARNING: 50% Time Elapsed": "#FFAA00",
+                "🟢 On Track": "#00CC96"
+            },
+            hover_data=["Owner", "Deadline"]
+        )
+        fig.update_yaxes(autorange="reversed")
+        st.plotly_chart(fig, use_container_width=True)
 
-    # Detailed Table & Raw Text
-    tab1, tab2 = st.tabs(["Mapped Findings", "Raw Extraction"])
-    with tab1:
+        # Data View
+        st.subheader("Detailed Remediation Ledger")
         st.dataframe(df, use_container_width=True)
-    with tab2:
-        st.text_area("Extracted OCR Text", full_text, height=300)
+    else:
+        st.error("Sentinel could not identify specific MRA patterns. Check the 'Raw Text' tab.")
+        with st.expander("View Raw Text"):
+            st.text(raw_text)
 else:
-    st.info("Upload a regulatory letter to auto-populate the tracker.")
+    st.info("Awaiting PDF upload to initialize Command Center.")
