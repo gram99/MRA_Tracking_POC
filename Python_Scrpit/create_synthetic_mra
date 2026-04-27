@@ -1,1 +1,25 @@
+# This code creates a synthetic pdf for test purposes.
+# Code was run in Jupyter Notebook or other IDEs may be used.
 
+
+from fpdf import FPDF
+
+def create_synthetic_mra(agency="OCC"):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    
+    if agency == "OCC":
+        pdf.cell(200, 10, txt="Office of the Comptroller of the Currency", ln=True, align='C')
+        pdf.multi_cell(0, 10, txt="\nConcern: Model risk management lacks independent validation.\n"
+                                   "Corrective Action: Establish a 2nd line validation team.\n"
+                                   "Target Date: 12/31/2024")
+    else:
+        pdf.cell(200, 10, txt="Federal Reserve Board of Governors", ln=True, align='C')
+        pdf.multi_cell(0, 10, txt="\nRequired Action: Management must formalize credit review.\n"
+                                   "Timeline: 09/15/2024")
+    
+    pdf.output(f"test_{agency}_letter.pdf")
+
+create_synthetic_mra("OCC")
+create_synthetic_mra("FRB")
