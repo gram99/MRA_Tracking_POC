@@ -19,6 +19,10 @@ REGULATORY_MAP = {
     }
 }
 
+# --- LOGIC: DOWNLOAD CONVERTER ---
+def convert_df_to_csv(df):
+    return df.to_csv(index=False).encode('utf-8')
+
 # --- LOGIC: EXTRACTION ENGINE ---
 def extract_mra_from_pdf(pdf_bytes):
     text = ""
@@ -32,7 +36,6 @@ def extract_mra_from_pdf(pdf_bytes):
 
     # NLP Logic: Find deadlines based on agency-specific keywords
     deadline_pattern = "|".join(config["deadline_keywords"])
-    # Regex looks for the keyword, optional punctuation, and a date (MM/DD/YYYY)
     date_matches = re.findall(rf"(?:{deadline_pattern})[:\s]*(\d{{1,2}}/\d{{1,2}}/\d{{2,4}})", text, re.IGNORECASE)
 
     extracted_findings = []
@@ -45,14 +48,14 @@ def extract_mra_from_pdf(pdf_bytes):
         extracted_findings.append({
             "MRA_ID": f"{agency}-2024-{i+1:03}",
             "Agency": agency,
-            "Finding_Summary": f"Extracted from {agency} Letter",
+            "Finding_Summary": f"Auto-extracted from {agency} Letter",
             "Owner": "Assignee Pending",
             "Start_Date": datetime.now() - timedelta(days=10),
             "Deadline": deadline,
             "Status": "In Progress"
         })
 
-    if not extracted_findings: # Fallback for empty/unstructured text
+    if not extracted_findings:
         return pd.DataFrame(), text
         
     return pd.DataFrame(extracted_findings), text
@@ -63,6 +66,7 @@ def apply_early_warning(df):
     today = datetime.now()
     
     def calculate_risk(row):
+        if row['Status'] == "Closed": return "✅ Closed"
         total_window = (row['Deadline'] - row['Start_Date']).days
         elapsed = (today - row['Start_Date']).days
         burn_rate = elapsed / total_window if total_window > 0 else 1
@@ -80,19 +84,23 @@ st.set_page_config(page_title="MRA Sentinel", layout="wide")
 st.title("🛡️ MRA Sentinel: Command Center")
 st.markdown("### Automated Regulatory Ingestion & Early Warning Tracker")
 
-# Sidebar
-st.sidebar.header("Sentinel Controls")
-st.sidebar.info("This system uses Custom Regex Mapping for OCC & FRB exam letters.")
-
 uploaded_file = st.file_uploader("Upload Regulatory PDF (OCC or FRB)", type=["pdf"])
 
 if uploaded_file:
-    # Processing
     with st.spinner("Executing Sentinel Scan..."):
         df, raw_text = extract_mra_from_pdf(uploaded_file.read())
         df = apply_early_warning(df)
 
     if not df.empty:
+        # Action Bar: Download Button
+        csv_data = convert_df_to_csv(df)
+        st.download_button(
+            label="📥 Download Remediation Ledger as CSV",
+            data=csv_data,
+            file_name=f"MRA_Remediation_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime='text/csv',
+        )
+
         # Metrics
         m1, m2, m3 = st.columns(3)
         m1.metric("Findings Identified", len(df))
@@ -123,7 +131,7 @@ if uploaded_file:
         st.subheader("Detailed Remediation Ledger")
         st.dataframe(df, use_container_width=True)
     else:
-        st.error("Sentinel could not identify specific MRA patterns. Check the 'Raw Text' tab.")
+        st.error("Sentinel could not identify specific MRA patterns. Check the 'Raw Text' expander below.")
         with st.expander("View Raw Text"):
             st.text(raw_text)
 else:
