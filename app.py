@@ -86,18 +86,17 @@ if "uploader_key" not in st.session_state:
 # Sidebar
 st.sidebar.header("Sentinel Controls")
 
-# NEW: Clear Files Button (only resets the uploader widget)
-if st.sidebar.button("📁 Clear Uploaded Files", help="Removes files from the uploader but keeps extracted data"):
+if st.sidebar.button("📁 Clear Uploaded Files"):
     st.session_state.uploader_key += 1
     st.rerun()
 
-if st.sidebar.button("🗑️ Reset Master Tracker", help="Deletes all MRAs and Audit Logs"):
+if st.sidebar.button("🗑️ Reset Master Tracker"):
     st.session_state.mra_data = pd.DataFrame()
     st.session_state.audit_log = pd.DataFrame(columns=["Timestamp", "MRA_ID", "Event", "Previous_Status", "New_Status"])
     st.session_state.uploader_key += 1
     st.rerun()
 
-# Dynamic Uploader Key ensures we can clear it on demand
+# Multi-file Uploader
 uploaded_files = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True, key=f"pdf_uploader_{st.session_state.uploader_key}")
 
 if uploaded_files:
@@ -109,7 +108,9 @@ if uploaded_files:
 if not st.session_state.mra_data.empty:
     # 1. ANALYTICS
     st.subheader("📊 Portfolio Risk Analytics")
-    col1, col2 = st.columns()
+    # FIX: Explicitly defined columns as (2) to prevent TypeError
+    col1, col2 = st.columns(2) 
+    
     with col1:
         st.metric("Master Inventory", len(st.session_state.mra_data))
         risk_c = len(st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀")])
@@ -123,15 +124,23 @@ if not st.session_state.mra_data.empty:
                 domain=["💀 OVERDUE", "🚨 CRITICAL: 75%+", "⚠️ WARNING: 50%+", "🟢 On Track", "✅ Closed"],
                 range=["#000000", "#FF4B4B", "#FFAA00", "#00CC96", "#2E7D32"]
             ))
-        ).properties(height=200)
+        ).properties(height=180)
         st.altair_chart(heat_chart, use_container_width=True)
 
     # 2. LEDGER (With Audit Tracking)
     st.subheader("📋 Centralized Remediation Ledger")
     
+    # Store old status to detect changes
     old_df = st.session_state.mra_data.copy()
-    edited_df = st.data_editor(st.session_state.mra_data, use_container_width=True, num_rows="dynamic")
     
+    edited_df = st.data_editor(
+        st.session_state.mra_data, 
+        use_container_width=True, 
+        num_rows="dynamic",
+        key="main_editor"
+    )
+    
+    # Audit Check: Detect Status Transitions
     if not edited_df.equals(old_df):
         for idx, row in edited_df.iterrows():
             if idx in old_df.index:
@@ -144,8 +153,8 @@ if not st.session_state.mra_data.empty:
                         "New_Status": row['Status']
                     }])
                     st.session_state.audit_log = pd.concat([st.session_state.audit_log, new_entry], ignore_index=True)
-        
-    st.session_state.mra_data = apply_sentinel_logic(edited_df)
+        # Apply edits back to master
+        st.session_state.mra_data = apply_sentinel_logic(edited_df)
 
     # 3. ROADMAP & AUDIT TRAIL TABS
     tab1, tab2, tab3 = st.tabs(["🗺️ Strategic Roadmap", "📧 Alerts", "📜 Audit Trail"])
@@ -168,7 +177,7 @@ if not st.session_state.mra_data.empty:
         critical_items = st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨")]
         if not critical_items.empty:
             target = st.selectbox("Select MRA for Alert:", critical_items['MRA_ID'])
-            row = critical_items[critical_items['MRA_ID'] == target].iloc
+            row = critical_items[critical_items['MRA_ID'] == target].iloc[0]
             st.text_area("Draft Notification", f"Subject: URGENT: Remediation Alert [{row['MRA_ID']}]\n\nDear {row['Owner']},\n\nFinding {row['MRA_ID']} is at CRITICAL risk ({int(row['Days_Remaining'])} days remaining).\nDeadline: {row['Deadline'].strftime('%Y-%m-%d')}\n\nPlease update status immediately.", height=150)
         else:
             st.success("No critical alerts required.")
@@ -177,7 +186,6 @@ if not st.session_state.mra_data.empty:
         st.subheader("Historical Log of Status Changes")
         if not st.session_state.audit_log.empty:
             st.dataframe(st.session_state.audit_log, use_container_width=True)
-            # EXPORT AUDIT LOG
             st.download_button("📥 Export Audit Log", convert_df_to_csv(st.session_state.audit_log), "MRA_Audit_Trail.csv", "text/csv")
         else:
             st.info("No status changes recorded yet.")
