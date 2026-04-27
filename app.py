@@ -14,7 +14,7 @@ REGULATORY_MAP = {
 THEME_REFS = {
     "Cybersecurity/IT": {
         "keywords": [r"cyber", r"it risk", r"firewall", r"access control"],
-        "ref": "OCC Bulletin 2013-29 / OCC 2023-17 (Third-Party IT)"
+        "ref": "OCC Bulletin 2013-29 / OCC 2023-17"
     },
     "Financial Crime/AML": {
         "keywords": [r"aml", r"bsa", r"money laundering", r"kyc"],
@@ -22,14 +22,14 @@ THEME_REFS = {
     },
     "Model Risk": {
         "keywords": [r"model risk", r"validation", r"back-test", r"sr 11-7"],
-        "ref": "SR 11-7 / OCC 2011-12 (Model Risk Management)"
+        "ref": "SR 11-7 / OCC 2011-12"
     },
     "Compliance/Legal": {
-        "keywords": [r"compliance", r"legal", r"regulation", r"consumer protection"],
-        "ref": "OCC Bulletin 2014-52 (MRA Standards)"
+        "keywords": [r"compliance", r"legal", r"regulation"],
+        "ref": "OCC Bulletin 2014-52"
     },
     "Capital/Liquidity": {
-        "keywords": [r"capital", r"liquidity", r"stress test", r"funding"],
+        "keywords": [r"capital", r"liquidity", r"stress test"],
         "ref": "Reg YY / SR 12-7"
     }
 }
@@ -71,7 +71,8 @@ def extract_mras_from_pdf(pdf_bytes, filename):
             "Owner": "LOB Pending",
             "Start_Date": today_naive - timedelta(days=30),
             "Deadline": deadline,
-            "Status": "In Progress"
+            "Status": "In Progress",
+            "Last_Updated": today_naive # Initialize Last Updated
         })
     return pd.DataFrame(extracted_findings)
 
@@ -80,18 +81,21 @@ def apply_sentinel_logic(df):
     if df.empty: return df
     today = datetime.now().replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
     
-    for col in ["Deadline", "Start_Date"]:
+    for col in ["Deadline", "Start_Date", "Last_Updated"]:
         df[col] = pd.to_datetime(df[col], errors='coerce').dt.tz_localize(None)
 
     def process_row(row):
-        if pd.isnull(row['Deadline']) or pd.isnull(row['Start_Date']):
-            row['Risk_Status'] = "⚠️ Missing Dates"
-            row['Days_Remaining'] = 0
-            return row
-            
+        # 1. Days Remaining calculation
         delta = (row['Deadline'] - today).days
         row['Days_Remaining'] = delta if row['Status'] != "Closed" else 0
         
+        # 2. NEW: Days Since Last Update
+        if pd.notnull(row['Last_Updated']):
+            row['Days_Since_Update'] = (today - row['Last_Updated']).days
+        else:
+            row['Days_Since_Update'] = 0
+
+        # 3. Risk Logic
         if row['Status'] == "Closed": row['Risk_Status'] = "✅ Closed"
         elif delta < 0: row['Risk_Status'] = "💀 OVERDUE"
         elif row['Start_Date'] >= row['Deadline']: row['Risk_Status'] = "⚠️ Date Inversion"
@@ -149,7 +153,7 @@ if not st.session_state.mra_data.empty:
             risk_c = len(st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀")])
             st.metric("At-Risk Items", risk_c, delta_color="inverse")
         
-        # Trend Analysis: Status Distribution
+        # Risk chart
         trend_data = st.session_state.mra_data['Risk_Status'].value_counts().reset_index()
         trend_data.columns = ['Risk_Status', 'Count']
         trend_chart = alt.Chart(trend_data).mark_bar().encode(
@@ -165,15 +169,24 @@ if not st.session_state.mra_data.empty:
     with tab_ledger:
         st.subheader("Interactive Remediation Ledger")
         old_df = st.session_state.mra_data.copy()
+        
+        # Display editor with NEW "Days Since Update" column visibility
         edited_df = st.data_editor(st.session_state.mra_data, use_container_width=True, num_rows="dynamic", key="led_edit",
                                    column_config={
                                        "Theme": st.column_config.SelectboxColumn(options=list(THEME_REFS.keys()) + ["General / Other"]),
-                                       "Reg_Reference": st.column_config.TextColumn("Reg Reference")
+                                       "Reg_Reference": st.column_config.TextColumn("Reg Reference"),
+                                       "Days_Since_Update": st.column_config.NumberColumn("Age (Days)", disabled=True, format="%d"),
+                                       "Last_Updated": st.column_config.DatetimeColumn(disabled=True)
                                    })
+        
+        # Audit Check Logic (Also updates Last_Updated timestamp)
         if not edited_df.equals(old_df):
             today = datetime.now().replace(tzinfo=None)
             for idx, row in edited_df.iterrows():
                 if idx in old_df.index and row['Status'] != old_df.loc[idx, 'Status']:
+                    # Update the Last_Updated timestamp for this row
+                    edited_df.at[idx, 'Last_Updated'] = today
+                    
                     over_days = (today - pd.to_datetime(row['Deadline']).replace(tzinfo=None)).days
                     ctx = f"⚠️ Post-Deadline ({over_days}d late)" if over_days > 0 else "✅ On-Schedule"
                     new_log = pd.DataFrame([{"Timestamp": today.strftime("%Y-%m-%d %H:%M:%S"), "MRA_ID": row['MRA_ID'], 
@@ -192,7 +205,7 @@ if not st.session_state.mra_data.empty:
                     domain=["💀 OVERDUE", "🚨 CRITICAL: 75%+", "⚠️ WARNING: 50%+", "🟢 On Track", "✅ Closed"],
                     range=["#000000", "#FF4B4B", "#FFAA00", "#00CC96", "#2E7D32"]
                 )),
-                tooltip=['MRA_ID', 'Theme', 'Reg_Reference', 'Status', 'Days_Remaining']
+                tooltip=['MRA_ID', 'Theme', 'Owner', 'Status', 'Days_Since_Update']
             ).properties(height=alt.Step(40)).interactive()
             st.altair_chart(gantt, use_container_width=True)
 
@@ -200,9 +213,8 @@ if not st.session_state.mra_data.empty:
         critical = st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀")]
         if not critical.empty:
             target = st.selectbox("Select MRA for Escalation:", critical['MRA_ID'])
-            # FIXED: Added .iloc[0] to correctly index the row
             row = critical[critical['MRA_ID'] == target].iloc[0]
-            st.text_area("Email Draft", f"Subject: URGENT: {row['MRA_ID']} [{row['Theme']}] Alert\nRef: {row['Reg_Reference']}\n\nDear {row['Owner']},\n\nFinding {row['MRA_ID']} regarding {row['Theme']} is currently {row['Risk_Status']}.\nDeadline: {row['Deadline'].strftime('%Y-%m-%d')}\nDays Remaining/Late: {int(row['Days_Remaining'])}\n\nPlease update status immediately.", height=180)
+            st.text_area("Email Draft", f"Subject: URGENT: {row['MRA_ID']} Alert\nRef: {row['Reg_Reference']}\n\nDear {row['Owner']},\n\nFinding {row['MRA_ID']} regarding {row['Theme']} is currently {row['Risk_Status']}.\nDeadline: {row['Deadline'].strftime('%Y-%m-%d')}\nDays Since Last Update: {int(row['Days_Since_Update'])}\n\nPlease update status immediately.", height=180)
         else: st.success("Portfolio healthy.")
 
     with tab_audit:
