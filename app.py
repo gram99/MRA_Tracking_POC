@@ -30,34 +30,61 @@ RISK_COLORS = {
     "✅ Closed": "#2E7D32"
 }
 
-# --- PDF GENERATOR ---
+# --- PDF GENERATOR (With Overdue Table) ---
 def generate_exec_pdf(df, risk_counts):
     buffer = io.BytesIO()
     p = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
 
+    # Header
     p.setFont("Helvetica-Bold", 18)
     p.drawString(100, height - 80, "MRA Sentinel: Executive Summary")
-    p.setFont("Helvetica", 12)
+    p.setFont("Helvetica", 10)
     p.drawString(100, height - 100, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     
-    # Metrics
+    # Section 1: Portfolio Metrics
     p.setFont("Helvetica-Bold", 14)
-    p.drawString(100, height - 140, "Key Metrics")
+    p.drawString(100, height - 140, "1. Portfolio Metrics")
     p.setFont("Helvetica", 12)
     p.drawString(120, height - 160, f"Total MRAs in Portfolio: {len(df)}")
     
-    overdue_val = abs(df[df['Days_Remaining'] < 0]['Days_Remaining'].min()) if not df[df['Days_Remaining'] < 0].empty else 0
-    p.drawString(120, height - 180, f"Max Days Overdue: {int(overdue_val)}")
+    overdue_df = df[df['Days_Remaining'] < 0]
+    max_overdue = abs(overdue_df['Days_Remaining'].min()) if not overdue_df.empty else 0
+    p.drawString(120, height - 180, f"Max Days Overdue: {int(max_overdue)}")
 
-    # Portfolio Health
+    # Section 2: Risk Distribution
     p.setFont("Helvetica-Bold", 14)
-    p.drawString(100, height - 220, "Portfolio Health Distribution")
+    p.drawString(100, height - 220, "2. Risk Distribution")
     y_pos = height - 240
-    p.setFont("Helvetica", 12)
+    p.setFont("Helvetica", 11)
     for status, count in risk_counts.items():
         p.drawString(120, y_pos, f"- {status}: {count}")
         y_pos -= 20
+
+    # Section 3: Overdue Action Items Table
+    if not overdue_df.empty:
+        p.setFont("Helvetica-Bold", 14)
+        p.drawString(100, y_pos - 20, "3. Critical Exceptions (Overdue Items)")
+        y_pos -= 50
+        p.setFont("Helvetica-Bold", 10)
+        p.drawString(110, y_pos, "MRA ID")
+        p.drawString(220, y_pos, "Owner")
+        p.drawString(350, y_pos, "Days Overdue")
+        y_pos -= 15
+        p.line(100, y_pos + 12, 500, y_pos + 12)
+        
+        p.setFont("Helvetica", 10)
+        for _, row in overdue_df.iterrows():
+            if y_pos < 50: # Page break safety
+                p.showPage()
+                y_pos = height - 80
+            p.drawString(110, y_pos, str(row['MRA_ID']))
+            p.drawString(220, y_pos, str(row['Owner'])[:25])
+            p.drawString(350, y_pos, f"{abs(int(row['Days_Remaining']))}")
+            y_pos -= 15
+    else:
+        p.setFont("Helvetica-Oblique", 12)
+        p.drawString(120, y_pos - 40, "No overdue items detected in current portfolio.")
 
     p.showPage()
     p.save()
@@ -142,7 +169,6 @@ if not st.session_state.mra_data.empty:
             max_overdue = abs(overdue_items['Days_Remaining'].min()) if not overdue_items.empty else 0
             st.metric("Max Days Overdue", int(max_overdue), delta_color="inverse")
             
-            # DONUT: Reduced font and 2-column legend
             st.write("**Portfolio Health Distribution**")
             donut = alt.Chart(chart_df).mark_arc(innerRadius=50).encode(
                 theta="count():Q",
@@ -152,7 +178,7 @@ if not st.session_state.mra_data.empty:
             ).properties(height=250)
             st.altair_chart(donut, use_container_width=True)
 
-            # PDF Export Button
+            # Updated PDF Export
             pdf_data = generate_exec_pdf(chart_df, risk_counts)
             st.download_button("📄 Export Executive Summary (PDF)", pdf_data, "MRA_Executive_Summary.pdf", "application/pdf")
 
