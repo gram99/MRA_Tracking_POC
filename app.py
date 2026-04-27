@@ -25,7 +25,7 @@ def extract_mras_from_pdf(pdf_bytes, filename):
     date_matches = re.findall(rf"(?:{'|'.join(keywords)})[:\s]*(\d{{1,2}}/\d{{1,2}}/\d{{2,4}})", text, re.IGNORECASE)
 
     extracted_findings = []
-    # Force standard naive datetime for 2026 system compatibility
+    # Set default start to well before current date for safety
     today_naive = datetime.now().replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
     
     for i, date_str in enumerate(date_matches if date_matches else ["Placeholder"]):
@@ -38,7 +38,7 @@ def extract_mras_from_pdf(pdf_bytes, filename):
             "MRA_ID": f"{agency}-{filename[:5].upper()}-{i+1:02}",
             "Agency": agency,
             "Owner": "LOB Pending",
-            "Start_Date": today_naive - timedelta(days=90),
+            "Start_Date": today_naive - timedelta(days=30),
             "Deadline": deadline,
             "Status": "In Progress"
         })
@@ -68,7 +68,7 @@ def apply_sentinel_logic(df, auto_fix=False):
                 row['Start_Date'] = row['Deadline'] - timedelta(days=90)
                 row['Risk_Status'] = "🟢 Fixed"
             else:
-                row['Risk_Status'] = "❌ Error: Invalid Dates"
+                row['Risk_Status'] = "❌ Error: Date Inversion"
         else:
             total_window = (row['Deadline'] - row['Start_Date']).days
             elapsed = (today - row['Start_Date']).days
@@ -85,7 +85,7 @@ st.set_page_config(page_title="MRA Sentinel", layout="wide")
 st.title("🛡️ MRA Sentinel: Command Center")
 
 st.sidebar.header("Sentinel Controls")
-auto_fix_enabled = st.sidebar.toggle("Enable Auto-Fix Dates", value=True)
+auto_fix_enabled = st.sidebar.toggle("Enable Auto-Fix Date Inversions", value=True)
 if st.sidebar.button("🗑️ Clear Master Tracker"):
     st.session_state.mra_data = pd.DataFrame()
     st.rerun()
@@ -106,8 +106,8 @@ if not st.session_state.mra_data.empty:
     col1, col2, col3 = st.columns([1, 1.5, 2])
     with col1:
         st.metric("Master Inventory", len(st.session_state.mra_data))
-        crit = len(st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀")])
-        st.metric("Risk Items", crit, delta_color="inverse")
+        risk_total = len(st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀")])
+        st.metric("Risk Items", risk_total, delta_color="inverse")
     with col2:
         dist = st.session_state.mra_data['Risk_Status'].value_counts().reset_index()
         dist.columns = ['Risk_Status', 'count']
@@ -127,28 +127,44 @@ if not st.session_state.mra_data.empty:
     # 3. ROADMAP
     tab1, tab2 = st.tabs(["🗺️ Strategic Roadmap", "📧 Alerts"])
     with tab1:
+        # --- THE FIX: CHRONOLOGY PROTECTION ---
         chart_df = st.session_state.mra_data.copy()
         
-        # --- THE CRITICAL FIX: CHRONOLOGY FORCING ---
-        # Plotly crashes on Start > Deadline. We force a 30-day visual bar for overdue items.
-        def fix_for_chart(row):
+        # Standardize for chart
+        chart_df['Deadline'] = pd.to_datetime(chart_df['Deadline']).dt.tz_localize(None)
+        chart_df['Start_Date'] = pd.to_datetime(chart_df['Start_Date']).dt.tz_localize(None)
+        
+        # If Start is after End, force a 30-day visual bar for rendering
+        def force_valid_range(row):
             if row['Start_Date'] >= row['Deadline']:
                 row['Start_Date'] = row['Deadline'] - timedelta(days=30)
             return row
         
-        chart_df = chart_df.apply(fix_for_chart, axis=1)
+        chart_df = chart_df.apply(force_valid_range, axis=1)
         chart_df['MRA_ID'] = chart_df['MRA_ID'].astype(str)
         chart_df = chart_df.dropna(subset=['Start_Date', 'Deadline']).reset_index(drop=True)
 
         if not chart_df.empty:
+            # High-stability timeline call
             fig_gantt = px.timeline(
-                chart_df, start="Start_Date", end="Deadline", x_start="Start_Date", x_end="Deadline", 
-                y="MRA_ID", color="Risk_Status", 
-                color_discrete_map={"💀 OVERDUE": "#000000", "🚨 CRITICAL: 75%+ Elapsed": "#FF4B4B", "⚠️ WARNING: 50% Elapsed": "#FFAA00", "🟢 On Track": "#00CC96", "✅ Closed": "#2E7D32"}
+                chart_df, 
+                start="Start_Date", 
+                end="Deadline", 
+                x_start="Start_Date", 
+                x_end="Deadline", 
+                y="MRA_ID", 
+                color="Risk_Status", 
+                color_discrete_map={
+                    "💀 OVERDUE": "#000000", 
+                    "🚨 CRITICAL: 75%+ Elapsed": "#FF4B4B", 
+                    "⚠️ WARNING: 50% Elapsed": "#FFAA00", 
+                    "🟢 On Track": "#00CC96", 
+                    "✅ Closed": "#2E7D32"
+                }
             )
             fig_gantt.update_yaxes(autorange="reversed")
             st.plotly_chart(fig_gantt, use_container_width=True)
         else:
-            st.warning("Roadmap hidden: No valid items.")
+            st.warning("No valid timeline data available.")
 
-    st.download_button("📥 Export CSV", convert_df_to_csv(st.session_state.mra_data), "MRA_Sentinel_Export.csv", "text/csv")
+    st.download_button("📥 Export Master Tracker (CSV)", convert_df_to_csv(st.session_state.mra_data), "MRA_Master_Tracker.csv", "text/csv")
