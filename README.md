@@ -1,7 +1,7 @@
 # 🛡️ MRA Sentinel: Regulatory Remediation & Early Warning Proof of Concept (PoC)
 
 ### **Proactive Regulatory Tracking*
-The "MRA Sentinel" is a centralized Command Center designed to migrate financial institutions from reactive, fragmented spreadsheet management to a **proactive regulatory defense**. By leveraging Natural Language Processing (NLP) and time-decay logic, the Sentinel ensures that Matters Requiring Attention (MRAs) are remediated well before they escalate into MRIAs or Enforcement Actions.
+The "MRA Sentinel" is a centralized dashboard designed to migrate financial institutions from reactive, fragmented spreadsheet management to a **proactive regulatory defense**. By leveraging Natural Language Processing (NLP) and time-decay logic, the Sentinel ensures that Matters Requiring Attention (MRAs) are remediated well before they escalate into MRIAs or Enforcement Actions.
 
 ---
 
