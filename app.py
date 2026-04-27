@@ -67,23 +67,19 @@ def apply_sentinel_logic(df):
     if df.empty: return df
     today = datetime.now().replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
     
-    # Initialize columns if they were created via manual 'Add Row'
     cols = ["Deadline", "Start_Date", "Last_Updated", "Days_Since_Update", "Status", "Theme", "Reg_Reference"]
     for c in cols:
         if c not in df.columns: df[c] = None
 
-    # Cast dates
     df['Deadline'] = pd.to_datetime(df['Deadline'], errors='coerce').dt.tz_localize(None)
     df['Start_Date'] = pd.to_datetime(df['Start_Date'], errors='coerce').dt.tz_localize(None)
     df['Last_Updated'] = pd.to_datetime(df['Last_Updated'], errors='coerce').dt.tz_localize(None).fillna(today)
 
     def process_row(row):
-        # 1. Stale Check
         days_stale = (today - row['Last_Updated']).days
         row['Days_Since_Update'] = max(0, days_stale)
         stale_prefix = "🧊 STALE: " if days_stale > 30 and row['Status'] != "Closed" else ""
 
-        # 2. Risk Math
         if pd.isnull(row['Deadline']) or pd.isnull(row['Start_Date']):
             row['Risk_Status'] = "⚠️ Missing Dates"
             row['Days_Remaining'] = 0
@@ -114,7 +110,6 @@ if "mra_data" not in st.session_state: st.session_state.mra_data = pd.DataFrame(
 if "audit_log" not in st.session_state: st.session_state.audit_log = pd.DataFrame(columns=["Timestamp", "MRA_ID", "Event", "Prev", "New", "Audit_Context"])
 if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0
 
-# Sidebar
 st.sidebar.header("Sentinel Controls")
 if st.sidebar.button("📁 Clear Files"):
     st.session_state.uploader_key += 1
@@ -135,21 +130,32 @@ if not st.session_state.mra_data.empty:
     tab_exec, tab_ledger, tab_roadmap, tab_alerts, tab_audit = st.tabs(["📊 Executive Dashboard", "📋 Centralized Ledger", "🗺️ Strategic Roadmap", "📧 Alerts", "📜 Audit Trail"])
 
     with tab_exec:
-        st.subheader("Portfolio Risk Snapshot")
+        st.subheader("Executive Risk Oversight")
         col1, col2 = st.columns(2)
         with col1:
+            # Metric Summary
             st.metric("Total MRAs", len(st.session_state.mra_data))
             risk_c = len(st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀")])
-            st.metric("Risk Portfolio", risk_c, delta_color="inverse")
-        with col2:
+            st.metric("Critical/Overdue", risk_c, delta_color="inverse")
+            
+            # Risk Status Bar Chart
             chart_df = st.session_state.mra_data.copy()
-            # Clean Risk_Status for chart domain consistency
             chart_df['Simple_Risk'] = chart_df['Risk_Status'].str.replace("🧊 STALE: ", "")
             exec_chart = alt.Chart(chart_df).mark_bar().encode(
                 x='count():Q', y=alt.Y('Simple_Risk:N', sort='-x', title=None),
                 color=alt.Color('Simple_Risk:N', scale=alt.Scale(domain=["💀 OVERDUE", "🚨 CRITICAL: 75%+", "⚠️ WARNING: 50%+", "🟢 On Track", "✅ Closed"], range=["#000000", "#FF4B4B", "#FFAA00", "#00CC96", "#2E7D32"]))
             ).properties(height=200)
             st.altair_chart(exec_chart, use_container_width=True)
+
+        with col2:
+            # NEW HEATMAP: Concentration of Risk by Owner
+            heatmap_chart = alt.Chart(chart_df).mark_rect().encode(
+                x=alt.X('Simple_Risk:N', title="Risk Tier", sort=["💀 OVERDUE", "🚨 CRITICAL: 75%+", "⚠️ WARNING: 50%+", "🟢 On Track", "✅ Closed"]),
+                y=alt.Y('Owner:N', title="Remediation Owner"),
+                color=alt.Color('count():Q', scale=alt.Scale(scheme='reds'), title="Frequency"),
+                tooltip=['Owner', 'Simple_Risk', 'count()']
+            ).properties(title="Regulatory Risk Heatmap", height=320)
+            st.altair_chart(heatmap_chart, use_container_width=True)
 
     with tab_ledger:
         st.subheader("Interactive Remediation Ledger")
@@ -170,11 +176,9 @@ if not st.session_state.mra_data.empty:
 
     with tab_roadmap:
         st.subheader("Chronological Roadmap")
-        # --- HARDENING: Remove STALE prefix for chart rendering consistency ---
         roadmap_df = st.session_state.mra_data.copy()
         roadmap_df['Chart_Risk'] = roadmap_df['Risk_Status'].str.replace("🧊 STALE: ", "")
         roadmap_df = roadmap_df.dropna(subset=['Start_Date', 'Deadline'])
-        
         if not roadmap_df.empty:
             gantt = alt.Chart(roadmap_df).mark_bar().encode(
                 x=alt.X('Start_Date:T', title='Timeline'),
@@ -184,8 +188,6 @@ if not st.session_state.mra_data.empty:
                 tooltip=['MRA_ID', 'Theme', 'Owner', 'Status', 'Days_Since_Update']
             ).properties(height=alt.Step(40)).interactive()
             st.altair_chart(gantt, use_container_width=True)
-        else:
-            st.info("Assign dates in the Ledger to view the Roadmap.")
 
     with tab_alerts:
         critical = st.session_state.mra_data[st.session_state.mra_data['Risk_Status'].str.contains("🚨|💀|🧊")]
