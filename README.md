@@ -67,3 +67,25 @@ The Sentinel implements a strict governance layer:
 
 **Disclaimer**: This tool is a Proof of Concept (PoC) only and should not be integrated with your institution's internal single-sign-on (SSO) and secure database protocols for production use.
 
+---
+
+## 📺 Screenshots
+
+
+<img width="1876" height="848" alt="Screenshot 2026-04-29 at 6 16 25 PM" src="https://github.com/user-attachments/assets/a286c0ab-3530-4181-90ae-30c9047885a1" />
+
+
+<img width="1874" height="709" alt="Screenshot 2026-04-29 at 6 16 37 PM" src="https://github.com/user-attachments/assets/666f1cd0-fb0d-4995-8b60-41ae43068b4c" />
+
+
+<img width="1870" height="752" alt="Screenshot 2026-04-29 at 6 16 52 PM" src="https://github.com/user-attachments/assets/2e4a36b1-3b7e-463e-9924-d7292e00fa05" />
+
+
+<img width="1847" height="662" alt="Screenshot 2026-04-29 at 6 17 07 PM" src="https://github.com/user-attachments/assets/353d5481-369b-439e-96bf-0299fb416a96" />
+
+
+<img width="1858" height="615" alt="Screenshot 2026-04-29 at 6 17 22 PM" src="https://github.com/user-attachments/assets/515c9afc-015d-43c7-9dad-007a76b24373" />
+
+
+
+
